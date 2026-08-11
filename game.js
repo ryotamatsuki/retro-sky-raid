@@ -6,6 +6,22 @@
   const HUD_H = 42;
   const PLAY_TOP = HUD_H + 4;
   const STORAGE_KEY = "retroSkyRaidHighScore";
+  const POINTER_EVENT_OPTIONS = { passive: false };
+  const POINTER_TARGET_RESPONSE = 18;
+  const TOUCH_DRAG_SENSITIVITY = 1;
+  const TOUCH_DRAG_DEADZONE = 2;
+  const TOUCH_CLICK_GUARD_MS = 500;
+  const PLAYER_COLLISION_RADIUS = 4;
+  const TOUCH_PLAYER_COLLISION_SCALE = 0.9;
+  const USER_AGENT = navigator.userAgent || "";
+  const HAS_COARSE_POINTER = typeof window.matchMedia === "function" &&
+    window.matchMedia("(pointer: coarse)").matches;
+  const HAS_REAL_TOUCH = Number(navigator.maxTouchPoints || 0) > 0 || HAS_COARSE_POINTER;
+  const IS_SMARTPHONE = Boolean(
+    navigator.userAgentData?.mobile ||
+    HAS_REAL_TOUCH ||
+    /Android|iPhone|iPad|iPod|Windows Phone|IEMobile|BlackBerry/i.test(USER_AGENT)
+  );
 
   const canvas = document.getElementById("game");
   const ctx = canvas.getContext("2d");
@@ -191,12 +207,37 @@
     mute: "KeyM"
   };
   const touchButtons = {};
+  const touchButtonClickGuards = new WeakMap();
   document.querySelectorAll("[data-action]").forEach((button) => {
     const code = actionCodes[button.dataset.action];
     if (!code) return;
     touchButtons[button.dataset.action] = button;
-    // click covers touch, keyboard, and assistive-technology activation once.
-    button.addEventListener("click", () => {
+
+    button.addEventListener("pointerdown", (event) => {
+      if (event.pointerType !== "touch" || event.isPrimary === false) return;
+      event.preventDefault();
+      input.pressed.add(code);
+      const guard = { pointerId: event.pointerId };
+      touchButtonClickGuards.set(button, guard);
+      window.setTimeout(() => {
+        if (touchButtonClickGuards.get(button) === guard) {
+          touchButtonClickGuards.delete(button);
+        }
+      }, TOUCH_CLICK_GUARD_MS);
+    }, POINTER_EVENT_OPTIONS);
+
+    button.addEventListener("pointercancel", (event) => {
+      if (event.pointerType === "touch") touchButtonClickGuards.delete(button);
+    });
+
+    // click covers mouse, keyboard, and assistive-technology activation once.
+    button.addEventListener("click", (event) => {
+      const guard = touchButtonClickGuards.get(button);
+      if (guard) {
+        touchButtonClickGuards.delete(button);
+        event.preventDefault();
+        return;
+      }
       input.pressed.add(code);
     });
   });
@@ -228,6 +269,7 @@
   }
 
   canvas.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
     // Keep one active pointer so a second touch cannot hijack the drag.
     if (input.pointerId !== null) return;
     if (event.pointerType === "touch" && event.isPrimary === false) return;
@@ -242,14 +284,22 @@
       startY: position.y,
       dragOrigin: null
     };
-    canvas.setPointerCapture(event.pointerId);
+    if (typeof canvas.setPointerCapture === "function") {
+      try {
+        canvas.setPointerCapture(event.pointerId);
+      } catch {
+        releasePointer(event.pointerId, true);
+        return;
+      }
+    }
     input.pressed.add("Space");
-  });
+  }, POINTER_EVENT_OPTIONS);
 
   canvas.addEventListener("pointermove", (event) => {
+    event.preventDefault();
     if (event.pointerId !== input.pointerId || !input.pointer) return;
     Object.assign(input.pointer, pointerPosition(event));
-  });
+  }, POINTER_EVENT_OPTIONS);
 
   canvas.addEventListener("pointerup", (event) => {
     releasePointer(event.pointerId);
@@ -263,6 +313,11 @@
     releasePointer(event.pointerId, true);
   });
 
+  canvas.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    clearTransientInput();
+  }, POINTER_EVENT_OPTIONS);
+
   window.addEventListener("blur", () => {
     clearTransientInput();
   });
@@ -275,6 +330,9 @@
     clearTransientInput();
   });
 
+  window.addEventListener("resize", clearTransientInput);
+  window.addEventListener("orientationchange", clearTransientInput);
+
   function releasePointer(pointerId = null, cancelPress = false) {
     if (input.pointerId === null) return;
     if (pointerId !== null && pointerId !== input.pointerId) return;
@@ -283,25 +341,47 @@
     input.pointer = null;
     input.pointerId = null;
     if (cancelPress) input.pointerPress = null;
-    if (canvas.hasPointerCapture && canvas.hasPointerCapture(activePointerId)) {
-      canvas.releasePointerCapture(activePointerId);
+    let hasCapture = false;
+    try {
+      hasCapture = typeof canvas.hasPointerCapture === "function" &&
+        canvas.hasPointerCapture(activePointerId);
+    } catch {
+      // The pointer may already have been invalidated during a viewport change.
     }
+    if (hasCapture && typeof canvas.releasePointerCapture === "function") {
+      try {
+        canvas.releasePointerCapture(activePointerId);
+      } catch {
+        // Capture may already have been released by the browser.
+      }
+    }
+  }
+
+  function resetTouchState() {
+    input.pressed.delete("Space");
+    input.shotQueued = false;
+    input.pointerPress = null;
+    releasePointer(null, true);
   }
 
   function clearTransientInput() {
     input.keys.clear();
     input.pressed.clear();
-    input.pointerPress = null;
     input.shotQueued = false;
-    releasePointer();
+    resetTouchState();
   }
 
   function pointerPosition(event) {
     const rect = canvas.getBoundingClientRect();
     return {
-      x: ((event.clientX - rect.left) / rect.width) * W,
-      y: ((event.clientY - rect.top) / rect.height) * H
+      x: clamp(rect.width > 0 ? ((event.clientX - rect.left) / rect.width) * W : 0, 0, W),
+      y: clamp(rect.height > 0 ? ((event.clientY - rect.top) / rect.height) * H : 0, 0, H)
     };
+  }
+
+  function applyDeadzone(value, deadzone) {
+    if (Math.abs(value) <= deadzone) return 0;
+    return value - Math.sign(value) * deadzone;
   }
 
   function difficultyIndexAt(y, count) {
@@ -779,7 +859,7 @@
         y: H - 56,
         w: 33,
         h: 35,
-        r: 4,
+        r: PLAYER_COLLISION_RADIUS * (IS_SMARTPHONE ? TOUCH_PLAYER_COLLISION_SCALE : 1),
         speed: 190,
         shotCd: 0,
         inv: 2.2,
@@ -942,6 +1022,7 @@
     updatePlayer(dt) {
       let ax = 0;
       let ay = 0;
+      let touchControlled = false;
       if (input.down("ArrowLeft", "KeyA")) ax -= 1;
       if (input.down("ArrowRight", "KeyD")) ax += 1;
       if (input.down("ArrowUp", "KeyW")) ay -= 1;
@@ -951,22 +1032,25 @@
         let targetX = input.pointer.x;
         let targetY = input.pointer.y;
         if (input.pointer.pointerType === "touch") {
+          touchControlled = true;
           if (!input.pointer.dragOrigin) {
             input.pointer.dragOrigin = { x: this.player.x, y: this.player.y };
           }
-          targetX = input.pointer.dragOrigin.x + input.pointer.x - input.pointer.startX;
-          targetY = input.pointer.dragOrigin.y + input.pointer.y - input.pointer.startY;
+          const dragX = applyDeadzone(input.pointer.x - input.pointer.startX, TOUCH_DRAG_DEADZONE);
+          const dragY = applyDeadzone(input.pointer.y - input.pointer.startY, TOUCH_DRAG_DEADZONE);
+          targetX = input.pointer.dragOrigin.x + dragX * TOUCH_DRAG_SENSITIVITY;
+          targetY = input.pointer.dragOrigin.y + dragY * TOUCH_DRAG_SENSITIVITY;
         }
         const dx = targetX - this.player.x;
         const dy = targetY - this.player.y;
-        ax = clamp(dx / 18, -1, 1);
-        ay = clamp(dy / 18, -1, 1);
+        ax = clamp(dx / POINTER_TARGET_RESPONSE, -1, 1);
+        ay = clamp(dy / POINTER_TARGET_RESPONSE, -1, 1);
       }
 
-      if (ax !== 0 || ay !== 0) {
-        const len = Math.hypot(ax, ay);
-        ax /= len;
-        ay /= len;
+      const inputMagnitude = Math.hypot(ax, ay);
+      if (inputMagnitude > 0 && (!touchControlled || inputMagnitude > 1)) {
+        ax /= inputMagnitude;
+        ay /= inputMagnitude;
       }
       this.player.x = clamp(this.player.x + ax * this.player.speed * dt, 15, W - 15);
       this.player.y = clamp(this.player.y + ay * this.player.speed * dt, PLAY_TOP + 18, H - 20);
@@ -976,7 +1060,8 @@
       this.player.blink += dt;
 
       if (input.consume("Space")) input.shotQueued = true;
-      if (input.down("Space", "KeyZ") || input.pointer || input.shotQueued) {
+      const autoFire = IS_SMARTPHONE && this.scene === "playing";
+      if (input.down("Space", "KeyZ") || input.pointer || input.shotQueued || autoFire) {
         if (this.firePlayer()) input.shotQueued = false;
       }
       if (input.consume("KeyX")) this.useBomb();
@@ -1549,11 +1634,16 @@
       drawSprite(this.assets.sprites.player, W / 2, 220 + Math.sin(this.t * 3) * 3, 68, 72);
       ctx.fillStyle = "#f2fbff";
       ctx.font = "bold 11px 'Courier New', monospace";
-      ctx.fillText("TAP / SPACE TO START", W / 2, 332);
+      ctx.fillText(IS_SMARTPHONE ? "TAP TO START" : "PRESS SPACE / ENTER", W / 2, 332);
       ctx.fillStyle = "#9ab0c8";
       ctx.font = "9px 'Courier New', monospace";
       ctx.fillText(`HI-SCORE ${padScore(this.highScore)}`, W / 2, 356);
-      ctx.fillText("DRAG TO MOVE / HOLD TO FIRE", W / 2, 378);
+      ctx.fillText(
+        IS_SMARTPHONE ? "DRAG ANYWHERE TO MOVE" : "3 STAGES  ARROWS/WASD  Z/SPACE  X  M",
+        W / 2,
+        378
+      );
+      if (IS_SMARTPHONE) ctx.fillText("AUTO FIRE / BOMB WHEN IN DANGER", W / 2, 396);
     }
 
     drawWorldDecor() {
@@ -1584,7 +1674,11 @@
       }
       ctx.fillStyle = "#9ab0c8";
       ctx.font = "9px 'Courier New', monospace";
-      ctx.fillText("TAP OPTION / LEFT-RIGHT TO CHANGE", W / 2, 352);
+      ctx.fillText(
+        IS_SMARTPHONE ? "TAP A DIFFICULTY TO START" : "LEFT / RIGHT TO CHANGE",
+        W / 2,
+        352
+      );
     }
 
     drawStageBanner() {
@@ -1616,8 +1710,8 @@
       ctx.fillText(`NEXT: ${STAGES[this.currentStage + 1].name}`, W / 2, 276);
       ctx.fillStyle = "#9ab0c8";
       ctx.font = "9px 'Courier New', monospace";
-      ctx.fillText("SPACE / ENTER TO LAUNCH", W / 2, 314);
-      ctx.fillText("ESC TITLE", W / 2, 332);
+      ctx.fillText(IS_SMARTPHONE ? "TAP TO CONTINUE" : "SPACE / ENTER TO LAUNCH", W / 2, 314);
+      if (!IS_SMARTPHONE) ctx.fillText("ESC TITLE", W / 2, 332);
     }
 
     drawPause() {
@@ -1628,7 +1722,7 @@
       ctx.font = "bold 24px 'Courier New', monospace";
       ctx.fillText("PAUSED", W / 2, H / 2);
       ctx.font = "9px 'Courier New', monospace";
-      ctx.fillText("ENTER / P", W / 2, H / 2 + 24);
+      ctx.fillText(IS_SMARTPHONE ? "USE PAUSE BUTTON TO RESUME" : "ENTER / P", W / 2, H / 2 + 24);
     }
 
     drawEnd(clear) {
@@ -1644,7 +1738,7 @@
       ctx.fillText(`HI ${padScore(this.highScore)}`, W / 2, 266);
       ctx.fillStyle = "#9ab0c8";
       ctx.font = "9px 'Courier New', monospace";
-      ctx.fillText("SPACE RETRY   ENTER TITLE", W / 2, 316);
+      ctx.fillText(IS_SMARTPHONE ? "TAP TO RETRY" : "SPACE RETRY   ENTER TITLE", W / 2, 316);
     }
   }
 
