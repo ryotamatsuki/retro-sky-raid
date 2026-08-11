@@ -830,18 +830,44 @@
     constructor() {
       this.ctx = null;
       this.master = null;
+      this.compressor = null;
       this.musicGain = null;
       this.sfxGain = null;
+      this.musicDuck = null;
+      this.pauseGain = null;
+      this.pauseFilter = null;
+      this.sfxGroups = Object.create(null);
+      this.noiseBuffer = null;
       this.bgm = null;
       this.enabled = true;
       this.muted = false;
       this.nextShotTime = 0;
       this.nextEnemyShotTime = 0;
+      this.nextHitTime = 0;
+      this.scheduleAheadTime = 0.16;
+      this.schedulerInterval = 25;
+      this.paused = false;
+      this.manualPaused = false;
+      this.visibilityPaused = false;
+      this.scenePaused = false;
+      this._onVisibilityChange = null;
+
+      if (typeof document !== "undefined" && document.addEventListener) {
+        this._onVisibilityChange = () => {
+          this.visibilityPaused = Boolean(document.hidden);
+          this._applyPauseState();
+        };
+        document.addEventListener("visibilitychange", this._onVisibilityChange);
+      }
     }
 
     ensure() {
       if (this.ctx) {
-        if (this.ctx.state === "suspended") this.ctx.resume();
+        if (this.ctx.state === "suspended" && this.ctx.resume) {
+          const resumeResult = this.ctx.resume();
+          if (resumeResult && resumeResult.catch) resumeResult.catch(() => {});
+        }
+        this._syncGameState();
         return;
       }
       if (!this.enabled) return;
@@ -850,24 +876,152 @@
         this.enabled = false;
         return;
       }
-      this.ctx = new AudioContext();
-      this.master = this.ctx.createGain();
-      this.musicGain = this.ctx.createGain();
-      this.sfxGain = this.ctx.createGain();
-      this.master.gain.value = this.muted ? 0 : 0.18;
-      this.musicGain.gain.value = 0.72;
-      this.sfxGain.gain.value = 0.95;
-      this.musicGain.connect(this.master);
-      this.sfxGain.connect(this.master);
-      this.master.connect(this.ctx.destination);
+      try {
+        this.ctx = new AudioContext();
+        this.master = this.ctx.createGain();
+        this.compressor = this.ctx.createDynamicsCompressor();
+        this.musicGain = this.ctx.createGain();
+        this.musicDuck = this.ctx.createGain();
+        this.pauseGain = this.ctx.createGain();
+        this.pauseFilter = this.ctx.createBiquadFilter();
+        this.sfxGain = this.ctx.createGain();
+
+        this.master.gain.value = this.muted ? 0 : 0.18;
+        this.musicGain.gain.value = 0.72;
+        this.musicDuck.gain.value = 1;
+        this.pauseGain.gain.value = 1;
+        this.pauseFilter.type = "lowpass";
+        this.pauseFilter.frequency.value = 18000;
+        this.pauseFilter.Q.value = 0.55;
+        this.sfxGain.gain.value = 0.95;
+
+        this.compressor.threshold.value = -18;
+        this.compressor.knee.value = 18;
+        this.compressor.ratio.value = 3.2;
+        this.compressor.attack.value = 0.003;
+        this.compressor.release.value = 0.18;
+
+        this.musicGain.connect(this.pauseFilter);
+        this.pauseFilter.connect(this.pauseGain);
+        this.pauseGain.connect(this.musicDuck);
+        this.musicDuck.connect(this.master);
+        this.sfxGain.connect(this.master);
+        this.master.connect(this.compressor);
+        this.compressor.connect(this.ctx.destination);
+
+        const groupLevels = {
+          shot: 0.88,
+          enemyShot: 0.68,
+          hit: 0.82,
+          item: 0.92,
+          explosion: 1,
+          bomb: 1,
+          miss: 0.92,
+          warning: 0.82,
+          ui: 0.78,
+          clear: 0.92,
+          gameover: 0.9,
+          boss: 1
+        };
+        Object.entries(groupLevels).forEach(([name, level]) => {
+          const group = this.ctx.createGain();
+          group.gain.value = level;
+          group.connect(this.sfxGain);
+          this.sfxGroups[name] = group;
+        });
+        this.noiseBuffer = this._createNoiseBuffer(2);
+        this.paused = false;
+        this._applyPauseState();
+      } catch {
+        this.ctx = null;
+        this.enabled = false;
+      }
     }
 
     toggleMute() {
       this.muted = !this.muted;
       if (this.master && this.ctx) {
-        this.master.gain.setTargetAtTime(this.muted ? 0 : 0.18, this.ctx.currentTime, 0.02);
+        this._fadeParam(this.master.gain, this.muted ? 0.0001 : 0.18, 0.02);
       }
       return this.muted;
+    }
+
+    pause() {
+      return this.setPaused(true);
+    }
+
+    resume() {
+      return this.setPaused(false);
+    }
+
+    setPaused(paused = true) {
+      this.manualPaused = Boolean(paused);
+      this._applyPauseState();
+      return this.paused;
+    }
+
+    setScenePaused(paused = false) {
+      this.scenePaused = Boolean(paused);
+      this._applyPauseState();
+      return this.paused;
+    }
+
+    _applyPauseState() {
+      const nextPaused = this.manualPaused || this.visibilityPaused || this.scenePaused;
+      if (nextPaused === this.paused) return;
+      this.paused = nextPaused;
+      if (!this.ctx || !this.pauseFilter) return;
+      const now = this.ctx.currentTime;
+      const cutoff = this.paused ? 1100 : 18000;
+      const pauseLevel = this.paused ? 0.3 : 1;
+      this.pauseFilter.frequency.cancelScheduledValues(now);
+      this.pauseFilter.frequency.setValueAtTime(Math.max(80, this.pauseFilter.frequency.value || 18000), now);
+      this.pauseFilter.frequency.setTargetAtTime(cutoff, now, this.paused ? 0.045 : 0.11);
+      this.pauseGain.gain.cancelScheduledValues(now);
+      this.pauseGain.gain.setTargetAtTime(pauseLevel, now, this.paused ? 0.045 : 0.12);
+      if (this.bgm && !this.paused) this.bgm.nextNoteTime = now + 0.035;
+    }
+
+    _syncGameState() {
+      this.scenePaused = Boolean(activeGame && activeGame.scene === "paused");
+      this._applyPauseState();
+      if (this.bgm && this.bgm.mode === "boss") this._syncBossPhase();
+    }
+
+    _fadeParam(param, value, timeConstant = 0.08, when = null) {
+      if (!param || !this.ctx) return;
+      const now = when ?? this.ctx.currentTime;
+      if (param.cancelScheduledValues) param.cancelScheduledValues(now);
+      if (param.setValueAtTime) param.setValueAtTime(Math.max(0.0001, param.value || 0.0001), now);
+      if (param.setTargetAtTime) {
+        param.setTargetAtTime(Math.max(0.0001, value), now, Math.max(0.005, timeConstant));
+      } else {
+        param.value = value;
+      }
+    }
+
+    _createNoiseBuffer(seconds = 2) {
+      if (!this.ctx) return null;
+      const length = Math.max(1, Math.ceil(this.ctx.sampleRate * seconds));
+      const buffer = this.ctx.createBuffer(1, length, this.ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < data.length; i += 1) {
+        data[i] = Math.random() * 2 - 1;
+      }
+      return buffer;
+    }
+
+    _sfxBus(name = "ui") {
+      return this.sfxGroups[name] || this.sfxGain;
+    }
+
+    _duckMusic(level = 0.42, hold = 0.34, release = 0.22) {
+      if (!this.ctx || !this.musicDuck) return;
+      const now = this.ctx.currentTime;
+      this.musicDuck.gain.cancelScheduledValues(now);
+      this.musicDuck.gain.setValueAtTime(Math.max(0.0001, this.musicDuck.gain.value || 1), now);
+      this.musicDuck.gain.setTargetAtTime(Math.max(0.08, Math.min(1, level)), now, 0.018);
+      this.musicDuck.gain.setTargetAtTime(1, now + Math.max(0.04, hold), Math.max(0.06, release));
     }
 
     midi(note) {
@@ -877,16 +1031,17 @@
     tone(freq, time, type = "square", gain = 0.08, slide = 1, destination = this.sfxGain, when = null) {
       if (!this.ctx) return;
       const now = when ?? this.ctx.currentTime;
+      const output = typeof destination === "string" ? this._sfxBus(destination) : (destination || this.sfxGain);
       const osc = this.ctx.createOscillator();
       const amp = this.ctx.createGain();
       osc.type = type;
       osc.frequency.setValueAtTime(freq, now);
       osc.frequency.exponentialRampToValueAtTime(Math.max(20, freq * slide), now + time);
       amp.gain.setValueAtTime(0.0001, now);
-      amp.gain.setValueAtTime(gain, now);
+      amp.gain.linearRampToValueAtTime(gain, now + Math.min(0.006, Math.max(0.0015, time * 0.12)));
       amp.gain.exponentialRampToValueAtTime(0.001, now + time);
       osc.connect(amp);
-      amp.connect(destination || this.sfxGain);
+      amp.connect(output);
       osc.start(now);
       osc.stop(now + time + 0.02);
     }
@@ -894,186 +1049,600 @@
     noise(time = 0.22, gain = 0.12, filterFreq = 900, destination = this.sfxGain, when = null) {
       if (!this.ctx) return;
       const now = when ?? this.ctx.currentTime;
-      const buffer = this.ctx.createBuffer(1, this.ctx.sampleRate * time, this.ctx.sampleRate);
-      const data = buffer.getChannelData(0);
-      for (let i = 0; i < data.length; i += 1) data[i] = Math.random() * 2 - 1;
       const source = this.ctx.createBufferSource();
       const filter = this.ctx.createBiquadFilter();
       const amp = this.ctx.createGain();
       filter.type = "lowpass";
       filter.frequency.setValueAtTime(filterFreq, now);
       filter.frequency.exponentialRampToValueAtTime(Math.max(80, filterFreq * 0.28), now + time);
-      amp.gain.setValueAtTime(gain, now);
+      amp.gain.setValueAtTime(0.0001, now);
+      amp.gain.setValueAtTime(gain, now + 0.004);
       amp.gain.exponentialRampToValueAtTime(0.001, now + time);
-      source.buffer = buffer;
+      source.buffer = this.noiseBuffer || this._createNoiseBuffer(Math.max(0.5, time));
+      source.loop = true;
       source.connect(filter);
       filter.connect(amp);
-      amp.connect(destination || this.sfxGain);
+      amp.connect(typeof destination === "string" ? this._sfxBus(destination) : (destination || this.sfxGain));
       source.start(now);
+      source.stop(now + time + 0.025);
     }
 
     shot(power = 1) {
       if (!this.ctx || this.ctx.currentTime < this.nextShotTime) return;
       const now = this.ctx.currentTime;
       this.nextShotTime = now + 0.045;
-      this.tone(820 + power * 42, 0.045, "square", 0.026, 1.95, this.sfxGain, now);
-      this.tone(1640 + power * 72, 0.028, "triangle", 0.016, 1.35, this.sfxGain, now + 0.008);
+      const bus = this._sfxBus("shot");
+      const jitter = 1 + (Math.random() - 0.5) * 0.04;
+      const base = (770 + Math.min(5, power) * 44) * jitter;
+      this.tone(base, 0.044, "square", 0.019, 1.78, bus, now);
+      if (power >= 3) {
+        this.tone(base * 2, 0.026, "triangle", 0.006 + Math.min(2, power - 3) * 0.0015, 1.28, bus, now + 0.008);
+      }
+      if (power >= 5) {
+        this.tone(base * 0.5, 0.06, "square", 0.007, 1.08, bus, now);
+      }
     }
 
-    enemyShot() {
+    enemyShot(kind = "light", phase = 1) {
       if (!this.ctx || this.ctx.currentTime < this.nextEnemyShotTime) return;
       const now = this.ctx.currentTime;
-      this.nextEnemyShotTime = now + 0.055;
-      this.tone(260, 0.065, "triangle", 0.018, 0.62, this.sfxGain, now);
-      this.tone(130, 0.08, "square", 0.012, 0.8, this.sfxGain, now + 0.01);
+      const bus = this._sfxBus("enemyShot");
+      const config = {
+        light: { cooldown: 0.055, freq: 330, length: 0.055, gain: 0.012, type: "triangle", slide: 0.66 },
+        cannon: { cooldown: 0.07, freq: 205, length: 0.09, gain: 0.018, type: "square", slide: 0.58 },
+        boss: { cooldown: phase >= 3 ? 0.085 : 0.07, freq: phase >= 3 ? 118 : 145, length: phase >= 3 ? 0.14 : 0.11, gain: 0.022, type: "sawtooth", slide: 0.52 }
+      }[kind] || { cooldown: 0.055, freq: 260, length: 0.065, gain: 0.014, type: "triangle", slide: 0.62 };
+      this.nextEnemyShotTime = now + config.cooldown;
+      this.tone(config.freq, config.length, config.type, config.gain, config.slide, bus, now);
+      if (kind === "cannon") this.tone(config.freq * 0.5, 0.1, "triangle", 0.009, 0.7, bus, now + 0.012);
+      if (kind === "boss") this.tone(config.freq * 1.9, phase >= 3 ? 0.055 : 0.04, "triangle", phase >= 3 ? 0.008 : 0.005, 0.66, bus, now + 0.018);
     }
 
-    item() {
+    hit(kind = "normal") {
       if (!this.ctx) return;
       const now = this.ctx.currentTime;
-      [72, 76, 79, 84].forEach((note, i) => {
-        this.tone(this.midi(note), 0.075, "square", 0.042, 1.02, this.sfxGain, now + i * 0.052);
+      const cooldown = kind === "boss" ? 0.065 : 0.05;
+      if (now < this.nextHitTime) return;
+      this.nextHitTime = now + cooldown;
+      const bus = this._sfxBus("hit");
+      if (kind === "boss") {
+        this.tone(205, 0.075, "triangle", 0.019, 0.72, bus, now);
+        this.tone(420, 0.045, "square", 0.007, 0.84, bus, now + 0.012);
+      } else {
+        this.tone(570 + Math.random() * 35, 0.042, "square", 0.011, 0.72, bus, now);
+      }
+    }
+
+    playerHit() {
+      return this.hit();
+    }
+
+    item(kind = "power") {
+      if (!this.ctx) return;
+      const now = this.ctx.currentTime;
+      const bus = this._sfxBus("item");
+      const notes = kind === "oneUp"
+        ? [72, 76, 79, 84, 88, 91]
+        : kind === "bomb"
+          ? [55, 60, 64, 67]
+          : [72, 76, 79, 84];
+      notes.forEach((note, i) => {
+        this.tone(this.midi(note), kind === "oneUp" ? 0.082 : 0.07, kind === "bomb" ? "sawtooth" : "square", kind === "bomb" ? 0.035 : 0.032, 1.02, bus, now + i * (kind === "oneUp" ? 0.065 : 0.055));
       });
+      if (kind === "bomb") this.tone(110, 0.18, "triangle", 0.025, 0.78, bus, now);
     }
 
     boom(big = false) {
       if (!this.ctx) return;
+      if (big) {
+        this.bossDefeat();
+        return;
+      }
       const now = this.ctx.currentTime;
-      this.noise(big ? 0.46 : 0.22, big ? 0.15 : 0.075, big ? 1500 : 1050, this.sfxGain, now);
-      this.tone(big ? 92 : 142, big ? 0.34 : 0.16, "sawtooth", big ? 0.078 : 0.038, 0.42, this.sfxGain, now);
-      if (big) this.tone(48, 0.42, "square", 0.045, 0.52, this.sfxGain, now + 0.03);
+      const bus = this._sfxBus("explosion");
+      this.noise(0.22, 0.075, 1050, bus, now);
+      this.tone(142, 0.16, "sawtooth", 0.038, 0.42, bus, now);
+    }
+
+    bossDefeat() {
+      if (!this.ctx) return;
+      const now = this.ctx.currentTime;
+      const bus = this._sfxBus("boss");
+      this._duckMusic(0.32, 0.8, 0.5);
+      this.noise(0.56, 0.18, 1700, bus, now);
+      this.tone(92, 0.42, "sawtooth", 0.08, 0.38, bus, now);
+      this.tone(48, 0.62, "square", 0.052, 0.5, bus, now + 0.035);
+      [60, 67, 72, 76, 79].forEach((note, i) => {
+        this.tone(this.midi(note), 0.22, "triangle", 0.038, 1.02, bus, now + 0.28 + i * 0.1);
+      });
     }
 
     bomb() {
       if (!this.ctx) return;
       const now = this.ctx.currentTime;
-      this.noise(0.5, 0.18, 2300, this.sfxGain, now);
-      this.tone(64, 0.48, "sawtooth", 0.09, 2.4, this.sfxGain, now);
+      const bus = this._sfxBus("bomb");
+      this._duckMusic(0.45, 0.26, 0.22);
+      this.noise(0.5, 0.18, 2300, bus, now);
+      this.tone(64, 0.48, "sawtooth", 0.09, 2.4, bus, now);
       [48, 55, 60, 67].forEach((note, i) => {
-        this.tone(this.midi(note), 0.12, "square", 0.04, 0.75, this.sfxGain, now + i * 0.055);
+        this.tone(this.midi(note), 0.12, "square", 0.04, 0.75, bus, now + i * 0.055);
       });
     }
 
     miss() {
       if (!this.ctx) return;
       const now = this.ctx.currentTime;
-      this.boom(true);
+      const bus = this._sfxBus("miss");
+      this._duckMusic(0.7, 0.2, 0.2);
+      this.noise(0.38, 0.14, 1250, bus, now);
+      this.tone(86, 0.34, "sawtooth", 0.065, 0.46, bus, now);
       [67, 62, 55, 48].forEach((note, i) => {
-        this.tone(this.midi(note), 0.11, "triangle", 0.045, 0.9, this.sfxGain, now + i * 0.075);
+        this.tone(this.midi(note), 0.11, "triangle", 0.045, 0.9, bus, now + i * 0.075);
       });
     }
 
+    warning(intensity = 1) {
+      if (!this.ctx) return;
+      const now = this.ctx.currentTime;
+      const bus = this._sfxBus("warning");
+      const level = Math.max(0.25, Math.min(1, intensity));
+      this._duckMusic(0.36, 0.52, 0.24);
+      [58, 58, 58].forEach((note, i) => {
+        this.tone(this.midi(note), 0.13, "square", 0.042 * level, 1.03, bus, now + i * 0.17);
+      });
+    }
+
+    bossWarning(stageId = 1) {
+      this.ensure();
+      if (!this.ctx) return;
+      this.stopBgm(false);
+      const bus = this._sfxBus("warning");
+      const now = this.ctx.currentTime;
+      const siren = stageId === 3 ? 520 : 440;
+      this._duckMusic(0.42, 0.62, 0.2);
+      for (let i = 0; i < 5; i += 1) {
+        const when = now + i * 0.14;
+        this.tone(i % 2 ? siren * 0.72 : siren, 0.085, "square", 0.026, 1.02, bus, when);
+        this.tone(68, 0.12, "triangle", 0.014, 0.72, bus, when + 0.01);
+      }
+      this.tone(980, 0.1, "square", 0.018, 0.82, bus, now + 0.7);
+      window.setTimeout(() => this.startBgm(stageId, "boss"), 760);
+    }
+
+    warn(intensity = 1) {
+      return this.warning(intensity);
+    }
+
     menuMove() {
-      this.tone(380, 0.045, "square", 0.022, 1.25);
+      this.tone(380, 0.045, "square", 0.022, 1.25, this._sfxBus("ui"));
     }
 
     menuSelect() {
       if (!this.ctx) return;
       const now = this.ctx.currentTime;
-      this.tone(520, 0.07, "square", 0.035, 1.12, this.sfxGain, now);
-      this.tone(780, 0.08, "square", 0.03, 1.18, this.sfxGain, now + 0.055);
+      const bus = this._sfxBus("ui");
+      this.tone(520, 0.07, "square", 0.035, 1.12, bus, now);
+      this.tone(780, 0.08, "square", 0.03, 1.18, bus, now + 0.055);
     }
 
     stageStart(stageId = 1) {
       if (!this.ctx) return;
       const now = this.ctx.currentTime;
       const root = [60, 62, 65][stageId - 1] || 60;
+      const bus = this._sfxBus("ui");
       [root, root + 7, root + 12].forEach((note, i) => {
-        this.tone(this.midi(note), 0.14, "square", 0.042, 1.01, this.sfxGain, now + i * 0.09);
+        this.tone(this.midi(note), 0.14, "square", 0.042, 1.01, bus, now + i * 0.09);
       });
     }
 
-    stageClear(final = false) {
+    stageClear(final = false, delay = 0) {
       if (!this.ctx) return;
-      const now = this.ctx.currentTime;
-      const notes = final ? [60, 64, 67, 72, 76, 79] : [60, 64, 67, 72];
+      const now = this.ctx.currentTime + Math.max(0, delay);
+      const bus = this._sfxBus("clear");
+      const notes = final ? [60, 64, 67, 72, 76, 79, 84, 88, 91] : [60, 64, 67, 72, 76];
       notes.forEach((note, i) => {
-        this.tone(this.midi(note), 0.13, "square", 0.046, 1.03, this.sfxGain, now + i * 0.09);
+        this.tone(this.midi(note), final ? 0.16 : 0.13, "square", final ? 0.038 : 0.04, 1.03, bus, now + i * (final ? 0.105 : 0.09));
       });
+      if (final) this.tone(this.midi(96), 0.4, "triangle", 0.035, 1.01, bus, now + 1.02);
+    }
+
+    clear(final = false) {
+      return this.stageClear(final);
     }
 
     gameOver() {
       if (!this.ctx) return;
       const now = this.ctx.currentTime;
+      const bus = this._sfxBus("gameover");
+      this._duckMusic(0.28, 0.9, 0.55);
       [55, 52, 48, 43].forEach((note, i) => {
-        this.tone(this.midi(note), 0.18, "triangle", 0.052, 0.96, this.sfxGain, now + i * 0.13);
+        this.tone(this.midi(note), 0.18, "triangle", 0.052, 0.96, bus, now + i * 0.13);
       });
     }
 
-    musicPattern(stageId, mode) {
-      if (mode === "boss") {
-        return {
-          bpm: 182,
-          bass: [36, 36, 43, 36, 35, 35, 42, 35, 38, 38, 45, 38, 41, 41, 48, 47],
-          lead: [72, null, 72, 75, null, 74, null, 72, 79, null, 77, null, 75, 74, 72, null],
-          arp: [60, 67, 72, 79],
-          bassGain: 0.042,
-          leadGain: 0.026
-        };
-      }
-      const patterns = [
+    musicPattern(stageId = 1, mode = "stage") {
+      const flatten = (...sections) => sections.reduce((all, section) => all.concat(section), []);
+      const stagePatterns = [
         {
-          bpm: 150,
-          bass: [36, 36, 43, 36, 48, 43, 36, 31, 36, 36, 43, 36, 50, 48, 43, 36],
-          lead: [72, null, 76, null, 79, null, 76, 74, 72, null, 76, null, 81, 79, 76, null],
-          arp: [60, 64, 67, 72],
+          bpm: 148,
           bassGain: 0.034,
-          leadGain: 0.021
+          leadGain: 0.021,
+          arpGain: 0.012,
+          bassType: "square",
+          leadType: "triangle",
+          arpType: "square",
+          bass: flatten(
+            [36, 36, null, 36, 43, 36, 48, 43, 36, 36, null, 36, 50, 48, 43, 36],
+            [36, 36, null, 38, 43, 36, 48, 43, 36, 36, null, 36, 50, 48, 43, 31],
+            [41, 41, null, 41, 48, 41, 53, 48, 41, 41, null, 41, 55, 53, 48, 41],
+            [36, 36, null, 36, 43, 36, 48, 43, 36, 36, null, 36, 50, 48, 43, 35]
+          ),
+          lead: flatten(
+            [72, null, 76, null, 79, null, 76, 74, 72, null, 76, null, 81, 79, 76, null],
+            [74, null, 77, 79, null, 77, 74, null, 79, null, 81, null, 84, 81, 79, null],
+            [76, null, 79, null, 84, 81, null, 79, 76, null, 79, null, 86, 84, 81, null],
+            [72, null, 76, null, 79, null, 76, 74, 72, null, 76, 79, 81, 79, 76, null]
+          ),
+          arp: flatten(
+            [60, 64, 67, 72, 64, 67, 72, 76, 60, 64, 67, 72, 64, 67, 72, 79],
+            [60, 64, 69, 72, 64, 69, 72, 76, 60, 64, 69, 72, 64, 69, 76, 81],
+            [65, 67, 72, 76, 67, 72, 76, 79, 65, 67, 72, 76, 67, 72, 79, 84],
+            [60, 64, 67, 72, 64, 67, 72, 76, 60, 64, 67, 72, 64, 67, 72, 79]
+          ),
+          kick: flatten(
+            [1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0],
+            [1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1],
+            [1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
+            [1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1]
+          ),
+          snare: flatten(
+            [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0],
+            [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1],
+            [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0],
+            [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1]
+          )
         },
         {
           bpm: 160,
-          bass: [38, 38, 45, 38, 50, 45, 38, 33, 41, 41, 48, 41, 53, 50, 48, 45],
-          lead: [74, null, 77, 79, null, 77, null, 74, 82, null, 81, 77, 79, null, 74, null],
-          arp: [62, 65, 69, 74],
           bassGain: 0.036,
-          leadGain: 0.023
+          leadGain: 0.023,
+          arpGain: 0.013,
+          bassType: "sawtooth",
+          leadType: "square",
+          arpType: "triangle",
+          bass: flatten(
+            [38, 38, null, 38, 45, 38, 50, 45, 38, 38, null, 38, 53, 50, 45, 33],
+            [41, 41, null, 41, 48, 41, 53, 48, 41, 41, null, 41, 55, 53, 48, 36],
+            [38, 38, null, 38, 45, 38, 50, 45, 38, 38, 45, 38, 53, 50, 48, 45],
+            [43, 43, null, 43, 50, 43, 55, 50, 43, 43, null, 43, 57, 55, 50, 38]
+          ),
+          lead: flatten(
+            [74, null, 77, 79, null, 77, null, 74, 82, null, 81, 77, 79, null, 74, null],
+            [76, 79, null, 81, 84, null, 81, 79, 86, null, 84, 81, 79, null, 77, null],
+            [74, null, 77, 79, null, 77, 81, null, 82, null, 81, 77, 79, 81, 84, null],
+            [79, null, 81, null, 84, 81, null, 79, 86, null, 84, 81, 79, null, 77, null]
+          ),
+          arp: flatten(
+            [62, 65, 69, 74, 65, 69, 74, 77, 62, 65, 69, 74, 65, 69, 74, 81],
+            [64, 67, 71, 76, 67, 71, 76, 79, 64, 67, 71, 76, 67, 71, 79, 83],
+            [62, 65, 69, 74, 65, 69, 74, 77, 62, 65, 69, 74, 65, 69, 77, 81],
+            [67, 71, 74, 79, 71, 74, 79, 83, 67, 71, 74, 79, 71, 74, 81, 86]
+          ),
+          kick: flatten(
+            [1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1, 0],
+            [1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1],
+            [1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1, 0],
+            [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1]
+          ),
+          snare: flatten(
+            [0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0],
+            [0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 1],
+            [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0],
+            [0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 1]
+          )
         },
         {
-          bpm: 170,
-          bass: [41, 41, 48, 41, 53, 48, 41, 36, 43, 43, 50, 43, 55, 53, 50, 48],
-          lead: [76, 79, null, 83, 81, null, 79, 76, 84, null, 83, 81, 79, 76, 74, null],
-          arp: [65, 69, 72, 77],
+          bpm: 172,
           bassGain: 0.039,
-          leadGain: 0.025
+          leadGain: 0.025,
+          arpGain: 0.014,
+          bassType: "triangle",
+          leadType: "sawtooth",
+          arpType: "square",
+          bass: flatten(
+            [41, 41, null, 41, 48, 41, 53, 48, 41, 41, null, 41, 55, 53, 50, 36],
+            [43, 43, null, 43, 50, 43, 55, 50, 43, 43, null, 43, 57, 55, 50, 38],
+            [41, 41, 48, 41, 53, 48, 41, 36, 43, 43, 50, 43, 55, 53, 50, 48],
+            [45, 45, null, 45, 52, 45, 57, 52, 45, 45, 52, 45, 59, 57, 52, 40]
+          ),
+          lead: flatten(
+            [76, 79, null, 83, 81, null, 79, 76, 84, null, 83, 81, 79, 76, 74, null],
+            [79, null, 83, 86, 84, null, 83, 79, 88, null, 86, 84, 83, 79, 77, null],
+            [81, 84, null, 86, 84, null, 81, 79, 88, null, 86, 84, 81, 79, 76, null],
+            [76, 79, null, 83, 81, null, 79, 76, 84, 86, null, 84, 81, 79, 76, null]
+          ),
+          arp: flatten(
+            [65, 69, 72, 77, 69, 72, 77, 81, 65, 69, 72, 77, 69, 72, 77, 84],
+            [67, 71, 74, 79, 71, 74, 79, 83, 67, 71, 74, 79, 71, 74, 81, 86],
+            [65, 69, 72, 77, 69, 72, 77, 81, 65, 69, 72, 77, 69, 72, 79, 84],
+            [69, 72, 76, 81, 72, 76, 81, 84, 69, 72, 76, 81, 72, 76, 83, 88]
+          ),
+          kick: flatten(
+            [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
+            [1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1],
+            [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1],
+            [1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1]
+          ),
+          snare: flatten(
+            [0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0],
+            [0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 1],
+            [0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0],
+            [0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 1]
+          )
         }
       ];
-      return patterns[stageId - 1] || patterns[0];
+      const bossPatterns = [
+        {
+          bpm: 184,
+          bassGain: 0.043,
+          leadGain: 0.026,
+          arpGain: 0.014,
+          bassType: "square",
+          leadType: "sawtooth",
+          arpType: "triangle",
+          bass: flatten(
+            [36, 36, 43, 36, 35, 35, 42, 35, 38, 38, 45, 38, 41, 41, 48, 47],
+            [36, 36, 43, 36, 35, 35, 42, 35, 38, 38, 45, 38, 41, 41, 50, 47],
+            [41, 41, 48, 41, 40, 40, 47, 40, 43, 43, 50, 43, 46, 46, 53, 52],
+            [36, 36, 43, 36, 35, 35, 42, 35, 38, 38, 45, 38, 41, 41, 48, 47]
+          ),
+          lead: flatten(
+            [72, null, 72, 75, null, 74, null, 72, 79, null, 77, null, 75, 74, 72, null],
+            [74, null, 74, 77, 79, null, 77, 74, 81, null, 79, 77, 75, 74, 72, null],
+            [79, null, 77, 79, null, 81, 79, 77, 84, null, 82, 81, 79, 77, 75, null],
+            [72, null, 72, 75, null, 74, null, 72, 79, 81, null, 79, 77, 75, 72, null]
+          ),
+          arp: flatten(
+            [60, 67, 72, 79, 60, 67, 72, 79, 62, 69, 74, 81, 62, 69, 74, 81],
+            [60, 67, 72, 79, 62, 69, 74, 81, 64, 71, 76, 83, 64, 71, 76, 83],
+            [65, 72, 77, 84, 65, 72, 77, 84, 67, 74, 79, 86, 67, 74, 79, 86],
+            [60, 67, 72, 79, 60, 67, 72, 79, 62, 69, 74, 81, 64, 71, 76, 83]
+          ),
+          kick: flatten(
+            [1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1],
+            [1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1],
+            [1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1],
+            [1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1]
+          ),
+          snare: flatten(
+            [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+            [0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1],
+            [0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1],
+            [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]
+          )
+        },
+        {
+          bpm: 192,
+          bassGain: 0.045,
+          leadGain: 0.028,
+          arpGain: 0.015,
+          bassType: "sawtooth",
+          leadType: "square",
+          arpType: "triangle",
+          bass: flatten(
+            [38, 38, 45, 38, 37, 37, 44, 37, 41, 41, 48, 41, 44, 44, 51, 50],
+            [38, 38, 45, 38, 37, 37, 44, 37, 41, 41, 48, 41, 44, 44, 53, 50],
+            [43, 43, 50, 43, 42, 42, 49, 42, 46, 46, 53, 46, 49, 49, 56, 55],
+            [38, 38, 45, 38, 37, 37, 44, 37, 41, 41, 48, 41, 44, 44, 51, 50]
+          ),
+          lead: flatten(
+            [74, null, 77, 79, null, 77, null, 74, 82, null, 81, 77, 79, null, 74, null],
+            [76, null, 79, 81, 82, null, 81, 77, 84, null, 83, 81, 79, 77, 76, null],
+            [81, null, 79, 81, null, 83, 81, 79, 86, null, 84, 83, 81, 79, 77, null],
+            [74, null, 77, 79, null, 77, null, 74, 82, 84, null, 82, 81, 79, 76, null]
+          ),
+          arp: flatten(
+            [62, 69, 74, 81, 62, 69, 74, 81, 64, 71, 76, 83, 64, 71, 76, 83],
+            [62, 69, 74, 81, 64, 71, 76, 83, 65, 72, 77, 84, 65, 72, 77, 84],
+            [67, 74, 79, 86, 67, 74, 79, 86, 69, 76, 81, 88, 69, 76, 81, 88],
+            [62, 69, 74, 81, 62, 69, 74, 81, 64, 71, 76, 83, 65, 72, 77, 84]
+          ),
+          kick: flatten(
+            [1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1],
+            [1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1],
+            [1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1],
+            [1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1]
+          ),
+          snare: flatten(
+            [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+            [0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1],
+            [0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1],
+            [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]
+          )
+        },
+        {
+          bpm: 200,
+          bassGain: 0.047,
+          leadGain: 0.03,
+          arpGain: 0.016,
+          bassType: "triangle",
+          leadType: "sawtooth",
+          arpType: "square",
+          bass: flatten(
+            [41, 41, 48, 41, 40, 40, 47, 40, 44, 44, 51, 44, 47, 47, 54, 53],
+            [43, 43, 50, 43, 42, 42, 49, 42, 46, 46, 53, 46, 49, 49, 56, 55],
+            [45, 45, 52, 45, 44, 44, 51, 44, 48, 48, 55, 48, 51, 51, 58, 57],
+            [41, 41, 48, 41, 40, 40, 47, 40, 44, 44, 51, 44, 47, 47, 54, 53]
+          ),
+          lead: flatten(
+            [76, 79, null, 83, 81, null, 79, 76, 84, null, 83, 81, 79, 76, 74, null],
+            [79, null, 83, 86, 84, null, 83, 79, 88, null, 86, 84, 83, 79, 77, null],
+            [83, 86, null, 88, 86, null, 84, 81, 91, null, 89, 86, 84, 81, 79, null],
+            [76, 79, null, 83, 81, null, 79, 76, 84, 86, null, 84, 81, 79, 76, null]
+          ),
+          arp: flatten(
+            [65, 72, 77, 84, 65, 72, 77, 84, 67, 74, 79, 86, 67, 74, 79, 86],
+            [67, 74, 79, 86, 69, 76, 81, 88, 67, 74, 79, 86, 69, 76, 81, 88],
+            [69, 76, 81, 88, 71, 78, 83, 90, 69, 76, 81, 88, 71, 78, 83, 90],
+            [65, 72, 77, 84, 65, 72, 77, 84, 67, 74, 79, 86, 69, 76, 81, 88]
+          ),
+          kick: flatten(
+            [1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1],
+            [1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1],
+            [1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1]
+          ),
+          snare: flatten(
+            [0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1],
+            [0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1],
+            [0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1],
+            [0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1]
+          )
+        }
+      ];
+      const index = Math.max(0, Math.min(2, Number(stageId) - 1 || 0));
+      const pattern = mode === "boss" ? bossPatterns[index] : stagePatterns[index];
+      if (mode !== "boss") return { ...pattern, steps: 64, mode: "stage" };
+
+      const sharpen = (values, amount) => values.map((note, i) => note == null ? null : note + (i % 8 === 7 ? amount : 0));
+      const phaseLayers = {
+        high: {
+          bass: pattern.bass,
+          lead: pattern.lead,
+          arp: pattern.arp,
+          kick: pattern.kick,
+          snare: pattern.snare,
+          density: 0.72,
+          leadGain: 1
+        },
+        mid: {
+          bass: pattern.bass.map((note, i) => note == null ? null : note + (i % 16 > 11 ? 12 : 0)),
+          lead: sharpen(pattern.lead, 1),
+          arp: pattern.arp.map((note, i) => note == null ? null : note + (i % 4 === 3 ? 12 : 0)),
+          kick: pattern.kick,
+          snare: pattern.snare,
+          density: 0.9,
+          leadGain: 1.08
+        },
+        low: {
+          bass: pattern.bass.map((note, i) => note == null ? null : note + (i % 4 === 3 ? 12 : 0)),
+          lead: sharpen(pattern.lead, 2),
+          arp: pattern.arp.map((note, i) => note == null ? null : note + (i % 2 ? 12 : 0)),
+          kick: pattern.kick.map((beat, i) => beat || i % 8 === 6 ? 1 : 0),
+          snare: pattern.snare.map((beat, i) => beat || i % 8 === 7 ? 1 : 0),
+          density: 1,
+          leadGain: 1.18
+        }
+      };
+      return { ...pattern, steps: 64, mode: "boss", phaseLayers };
     }
 
     startBgm(stageId = 1, mode = "stage") {
       this.ensure();
       if (!this.ctx) return;
       if (this.bgm && this.bgm.stageId === stageId && this.bgm.mode === mode) return;
-      this.stopBgm(true);
+      this.stopBgm(false);
       const pattern = this.musicPattern(stageId, mode);
       const bus = this.ctx.createGain();
-      bus.gain.value = mode === "boss" ? 0.16 : 0.13;
+      bus.gain.value = 0.0001;
       bus.connect(this.musicGain);
-      const bgm = { stageId, mode, pattern, step: 0, timer: null, bus, active: true };
-      const stepMs = Math.round(60000 / pattern.bpm / 4);
-      const playStep = () => {
-        if (!bgm.active || !this.ctx) return;
-        const step = bgm.step;
-        const now = this.ctx.currentTime + 0.01;
-        const stepSec = stepMs / 1000;
-        const bass = pattern.bass[step % pattern.bass.length];
-        const lead = pattern.lead[step % pattern.lead.length];
-        const arp = pattern.arp[(step + Math.floor(step / 4)) % pattern.arp.length];
-        if (bass != null && step % 2 === 0) {
-          this.tone(this.midi(bass), stepSec * 1.65, "square", pattern.bassGain, 0.985, bus, now);
-        }
-        if (lead != null) {
-          this.tone(this.midi(lead), stepSec * 0.86, "square", pattern.leadGain, 1.01, bus, now);
-        } else if (step % 4 === 1) {
-          this.tone(this.midi(arp), stepSec * 0.45, "triangle", 0.011, 1.03, bus, now);
-        }
-        if (step % 4 === 0) this.tone(92, 0.055, "triangle", 0.022, 0.55, bus, now);
-        if (step % 2 === 1) this.noise(0.035, 0.011, 5200, bus, now);
-        bgm.step += 1;
+      const now = this.ctx.currentTime;
+      const bgm = {
+        stageId,
+        mode,
+        pattern,
+        phase: "high",
+        pendingPhase: "high",
+        step: 0,
+        nextNoteTime: now + 0.045,
+        timer: null,
+        bus,
+        active: true
       };
-      playStep();
-      bgm.timer = window.setInterval(playStep, stepMs);
       this.bgm = bgm;
+      this._fadeParam(bus.gain, mode === "boss" ? 0.16 : 0.13, 0.085, now);
+      this._scheduleBgm();
+      bgm.timer = window.setInterval(() => this._scheduleBgm(), this.schedulerInterval);
+    }
+
+    _scheduleBgm() {
+      const bgm = this.bgm;
+      if (!bgm || !bgm.active || !this.ctx) return;
+      this._syncGameState();
+      if (this.paused) {
+        bgm.nextNoteTime = this.ctx.currentTime + 0.04;
+        return;
+      }
+      const stepSec = 60 / bgm.pattern.bpm / 4;
+      const horizon = this.ctx.currentTime + this.scheduleAheadTime;
+      let scheduled = 0;
+      while (bgm.nextNoteTime < horizon && scheduled < 32) {
+        this._scheduleBgmStep(bgm, bgm.step, bgm.nextNoteTime, stepSec);
+        bgm.nextNoteTime += stepSec;
+        bgm.step = (bgm.step + 1) % bgm.pattern.steps;
+        scheduled += 1;
+      }
+    }
+
+    _scheduleBgmStep(bgm, step, when, stepSec) {
+      const pattern = bgm.pattern;
+      if (bgm.mode === "boss" && step % 16 === 0) bgm.phase = bgm.pendingPhase || bgm.phase;
+      const phase = pattern.phaseLayers ? (pattern.phaseLayers[bgm.phase] || pattern.phaseLayers.high) : pattern;
+      const index = step % pattern.steps;
+      const bass = phase.bass[index];
+      const lead = phase.lead[index];
+      const arp = phase.arp[index];
+      const density = phase.density == null ? 1 : phase.density;
+
+      if (bass != null && step % 2 === 0) {
+        this.tone(this.midi(bass), stepSec * 1.72, pattern.bassType, pattern.bassGain, 0.985, bgm.bus, when);
+      }
+      if (lead != null && (density >= 1 || step % 4 !== 3 || Math.random() < density)) {
+        this.tone(this.midi(lead), stepSec * 0.82, pattern.leadType, pattern.leadGain * (phase.leadGain || 1), 1.01, bgm.bus, when);
+      } else if (arp != null && step % 2 === 1) {
+        this.tone(this.midi(arp), stepSec * 0.42, pattern.arpType, pattern.arpGain, 1.025, bgm.bus, when);
+      }
+      if (phase.kick[index]) {
+        this.tone(pattern.kickFreq || 92, stepSec * 0.72, "triangle", 0.021, 0.52, bgm.bus, when);
+      }
+      if (phase.snare[index]) {
+        this.noise(stepSec * 0.64, 0.0095, 4700, bgm.bus, when);
+      }
+      if (step % 2 === 1 || (bgm.mode === "boss" && phase === pattern.phaseLayers?.low && step % 4 === 2)) {
+        this.noise(stepSec * 0.34, bgm.mode === "boss" ? 0.008 : 0.006, 5800, bgm.bus, when);
+      }
+      if (step % 16 === 0) {
+        const padNote = bass == null ? 48 : bass + 12;
+        this.tone(this.midi(padNote), stepSec * 7.2, "sine", 0.009, 1.002, bgm.bus, when);
+      }
+    }
+
+    setBossPhase(hpRatio = 1) {
+      if (!this.bgm || this.bgm.mode !== "boss") return "high";
+      const ratio = Math.max(0, Math.min(1, Number(hpRatio) || 0));
+      const nextPhase = ratio > 0.7 ? "high" : ratio > 0.32 ? "mid" : "low";
+      if (this.bgm.phase !== nextPhase || this.bgm.pendingPhase !== nextPhase) {
+        this.bgm.pendingPhase = nextPhase;
+        this._duckMusic(nextPhase === "low" ? 0.58 : 0.72, 0.18, 0.16);
+      }
+      return this.bgm.phase;
+    }
+
+    bossPhase(hpRatio = 1) {
+      return this.setBossPhase(hpRatio);
+    }
+
+    bossHp(currentHp, maxHp) {
+      return this.setBossPhase(maxHp ? currentHp / maxHp : 0);
+    }
+
+    _syncBossPhase() {
+      if (!this.bgm || this.bgm.mode !== "boss") return;
+      const enemies = activeGame && Array.isArray(activeGame.enemies) ? activeGame.enemies : [];
+      const boss = enemies.find((enemy) => enemy && enemy.kind === "boss");
+      if (boss && Number.isFinite(boss.hp) && Number.isFinite(boss.maxHp) && boss.maxHp > 0) {
+        this.setBossPhase(boss.hp / boss.maxHp);
+      }
     }
 
     stopBgm(fast = false) {
@@ -1081,14 +1650,14 @@
       const bgm = this.bgm;
       bgm.active = false;
       window.clearInterval(bgm.timer);
-      if (this.ctx) bgm.bus.gain.setTargetAtTime(0.001, this.ctx.currentTime, fast ? 0.015 : 0.08);
+      if (this.ctx) this._fadeParam(bgm.bus.gain, 0.0001, fast ? 0.018 : 0.18);
       window.setTimeout(() => {
         try {
           bgm.bus.disconnect();
         } catch {
           // Already disconnected.
         }
-      }, fast ? 80 : 260);
+      }, fast ? 100 : 420);
       this.bgm = null;
     }
   }
@@ -1198,6 +1767,7 @@
       if (this.scene === scene) return;
       this.scene = scene;
       resetTouchState();
+      this.audio.setScenePaused(scene === "paused");
     }
 
     loop(now) {
@@ -1385,6 +1955,7 @@
       this.enemyBullets.length = 0;
       for (const enemy of this.enemies) {
         enemy.hp -= enemy.kind === "boss" ? 28 : 6;
+        if (enemy.kind === "boss") this.audio.bossHp(enemy.hp, enemy.maxHp);
         this.spawnExplosion(enemy.x, enemy.y, 44, true);
       }
       this.hitStop = 0.12;
@@ -1402,7 +1973,7 @@
       if (!this.spawnBossDone && this.stageTime >= this.stage.bossTime) {
         this.spawnBossDone = true;
         this.enemies.push(makeEnemy("boss", W / 2, -74, this.difficulties[this.diffIndex], this.stage));
-        this.audio.startBgm(this.stage.id, "boss");
+        this.audio.bossWarning(this.stage.id);
       }
     }
 
@@ -1472,23 +2043,30 @@
     }
 
     fireEnemy(enemy, speedScale) {
+      let shotType = "light";
+      let bossPhase = 1;
       if (enemy.kind === "small") {
         enemy.fire = 1.6 + Math.random() * 0.5;
         this.fireAimed(enemy.x, enemy.y + 10, 92 * speedScale, 2.7);
       } else if (enemy.kind === "medium") {
+        shotType = "cannon";
         enemy.fire = 1.15;
         this.fireSpread(enemy.x, enemy.y + 15, 5, 102 * speedScale, Math.PI / 2, 0.62);
       } else if (enemy.kind === "transport") {
         enemy.fire = 1.6;
         this.fireSpread(enemy.x, enemy.y + 18, 3, 92 * speedScale, Math.PI / 2, 0.42);
       } else if (enemy.kind === "tank") {
+        shotType = "cannon";
         enemy.fire = 1.75;
         this.fireAimed(enemy.x, enemy.y + 7, 118 * speedScale, 3.4);
       } else if (enemy.kind === "turret") {
+        shotType = "cannon";
         enemy.fire = 1.42;
         this.fireSpread(enemy.x, enemy.y + 6, 3, 112 * speedScale, Math.PI / 2, 0.7);
       } else if (enemy.kind === "boss") {
+        shotType = "boss";
         const hpRatio = enemy.hp / enemy.maxHp;
+        bossPhase = hpRatio > 0.7 ? 1 : hpRatio > 0.32 ? 2 : 3;
         const stageId = enemy.stageId || 1;
         const delayScale = enemy.fireDelayScale || 1;
         enemy.fire = (hpRatio > 0.7 ? 0.72 : hpRatio > 0.32 ? 0.54 : 0.34) * delayScale;
@@ -1507,7 +2085,7 @@
           }
         }
       }
-      this.audio.enemyShot();
+      this.audio.enemyShot(shotType, bossPhase);
     }
 
     fireAimed(x, y, speed, r) {
@@ -1596,6 +2174,8 @@
           bullet.dead = true;
           enemy.hp -= bullet.damage;
           this.spawnSpark(bullet.x, bullet.y);
+          if (enemy.kind === "boss") this.audio.bossHp(enemy.hp, enemy.maxHp);
+          if (enemy.hp > 0) this.audio.hit(enemy.kind === "boss" ? "boss" : "normal");
           if (enemy.hp <= 0) this.killEnemy(enemy);
           break;
         }
@@ -1631,7 +2211,7 @@
             this.bombs += 1;
           }
           this.floatText.push({ x: item.x, y: item.y - 12, text: item.kind.toUpperCase(), t: 0 });
-          this.audio.item();
+          this.audio.item(item.kind);
         }
       }
     }
@@ -1649,7 +2229,7 @@
         this.clearTimer = 1.8;
         const finalStage = this.currentStage >= STAGES.length - 1;
         this.audio.stopBgm();
-        this.audio.stageClear(finalStage);
+        this.audio.stageClear(finalStage, 0.78);
         window.setTimeout(() => {
           if (this.scene === "playing") {
             if (!finalStage) {
