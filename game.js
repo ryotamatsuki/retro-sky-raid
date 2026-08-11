@@ -8,8 +8,13 @@
   const STORAGE_KEY = "retroSkyRaidHighScore";
   const POINTER_EVENT_OPTIONS = { passive: false };
   const POINTER_TARGET_RESPONSE = 18;
-  const TOUCH_DRAG_SENSITIVITY = 1;
-  const TOUCH_DRAG_DEADZONE = 2;
+  const TOUCH_STICK_DEADZONE = 0.12;
+  const TOUCH_STICK_CURVE = 1.1;
+  const TOUCH_STICK_CENTER = { x: 52, y: H - 58 };
+  const TOUCH_STICK_RADIUS = 42;
+  const TOUCH_STICK_HIT_RADIUS = 66;
+  const TOUCH_FIRE_CENTER = { x: W - 54, y: H - 58 };
+  const TOUCH_FIRE_HIT_RADIUS = 48;
   const TOUCH_CLICK_GUARD_MS = 500;
   const PLAYER_COLLISION_RADIUS = 4;
   const TOUCH_PLAYER_COLLISION_SCALE = 0.9;
@@ -171,11 +176,16 @@
     }
   ];
 
+  let activeGame = null;
   const input = {
     keys: new Set(),
     pressed: new Set(),
-    pointer: null,
-    pointerId: null,
+    stickPointer: null,
+    firePointerId: null,
+    touchFireDown: false,
+    bombPointerId: null,
+    mousePointer: null,
+    menuPointerId: null,
     pointerPress: null,
     shotQueued: false,
     consume(code) {
@@ -208,17 +218,32 @@
   };
   const touchButtons = {};
   const touchButtonClickGuards = new WeakMap();
+  const stickElement = document.querySelector("[data-control='left-stick']");
+  const stickBaseElement = document.querySelector("[data-control-part='stick-base']");
+  const stickKnobElement = document.querySelector("[data-control-part='stick-knob']");
+  const fireButton = document.querySelector("[data-control='fire']");
   document.querySelectorAll("[data-action]").forEach((button) => {
     const code = actionCodes[button.dataset.action];
     if (!code) return;
     touchButtons[button.dataset.action] = button;
 
     button.addEventListener("pointerdown", (event) => {
-      if (event.pointerType !== "touch" || event.isPrimary === false) return;
+      if (event.pointerType !== "touch") return;
+      if (button.dataset.action === "bomb" && input.bombPointerId !== null) return;
       event.preventDefault();
       input.pressed.add(code);
       const guard = { pointerId: event.pointerId };
       touchButtonClickGuards.set(button, guard);
+      if (button.dataset.action === "bomb") {
+        input.bombPointerId = event.pointerId;
+        if (typeof button.setPointerCapture === "function") {
+          try {
+            button.setPointerCapture(event.pointerId);
+          } catch {
+            input.bombPointerId = null;
+          }
+        }
+      }
       window.setTimeout(() => {
         if (touchButtonClickGuards.get(button) === guard) {
           touchButtonClickGuards.delete(button);
@@ -227,7 +252,18 @@
     }, POINTER_EVENT_OPTIONS);
 
     button.addEventListener("pointercancel", (event) => {
-      if (event.pointerType === "touch") touchButtonClickGuards.delete(button);
+      if (event.pointerType === "touch") {
+        touchButtonClickGuards.delete(button);
+        releaseBombPointer(event.pointerId, button);
+      }
+    });
+
+    button.addEventListener("pointerup", (event) => {
+      if (event.pointerType === "touch") releaseBombPointer(event.pointerId, button);
+    });
+
+    button.addEventListener("lostpointercapture", (event) => {
+      if (event.pointerType === "touch") releaseBombPointer(event.pointerId, button);
     });
 
     // click covers mouse, keyboard, and assistive-technology activation once.
@@ -242,7 +278,94 @@
     });
   });
 
+  if (fireButton) {
+    fireButton.addEventListener("pointerdown", (event) => {
+      if (!isTouchPointer(event) || activeGame?.scene !== "playing") return;
+      event.preventDefault();
+      if (input.firePointerId !== null) return;
+      input.firePointerId = event.pointerId;
+      input.touchFireDown = activeGame?.scene === "playing";
+      fireButton.classList.add("is-pressed");
+      fireButton.setAttribute("aria-pressed", String(input.touchFireDown));
+      captureElementPointer(fireButton, event.pointerId);
+      const guard = { pointerId: event.pointerId };
+      touchButtonClickGuards.set(fireButton, guard);
+      window.setTimeout(() => {
+        if (touchButtonClickGuards.get(fireButton) === guard) {
+          touchButtonClickGuards.delete(fireButton);
+        }
+      }, TOUCH_CLICK_GUARD_MS);
+    }, POINTER_EVENT_OPTIONS);
+
+    fireButton.addEventListener("pointerup", (event) => {
+      releasePointer(event.pointerId);
+    });
+
+    fireButton.addEventListener("pointercancel", (event) => {
+      touchButtonClickGuards.delete(fireButton);
+      releasePointer(event.pointerId, true);
+    });
+
+    fireButton.addEventListener("lostpointercapture", (event) => {
+      touchButtonClickGuards.delete(fireButton);
+      releasePointer(event.pointerId, true);
+    });
+
+    fireButton.addEventListener("click", (event) => {
+      if (touchButtonClickGuards.has(fireButton)) {
+        touchButtonClickGuards.delete(fireButton);
+        event.preventDefault();
+        return;
+      }
+      if (activeGame?.scene === "playing") input.pressed.add("Space");
+    });
+  }
+
+  if (stickElement && stickBaseElement && stickKnobElement) {
+    stickElement.addEventListener("pointerdown", (event) => {
+      if (!isTouchPointer(event) || activeGame?.scene !== "playing") return;
+      event.preventDefault();
+      if (input.stickPointer !== null) return;
+      input.stickPointer = { pointerId: event.pointerId, moveX: 0, moveY: 0 };
+      stickElement.classList.add("is-active");
+      captureElementPointer(stickElement, event.pointerId);
+      updateStickPointer(event);
+    }, POINTER_EVENT_OPTIONS);
+
+    stickElement.addEventListener("pointermove", (event) => {
+      event.preventDefault();
+      if (input.stickPointer?.pointerId !== event.pointerId) return;
+      updateStickPointer(event);
+    }, POINTER_EVENT_OPTIONS);
+
+    stickElement.addEventListener("pointerup", (event) => {
+      releasePointer(event.pointerId);
+    });
+
+    stickElement.addEventListener("pointercancel", (event) => {
+      releasePointer(event.pointerId, true);
+    });
+
+    stickElement.addEventListener("lostpointercapture", (event) => {
+      releasePointer(event.pointerId, true);
+    });
+
+    stickElement.addEventListener("click", (event) => {
+      event.preventDefault();
+    });
+  }
+
   function syncTouchControls(game) {
+    const moveGuide = document.querySelector('[data-guide-item="move"]');
+    const fireGuide = document.querySelector('[data-guide-item="fire"]');
+    if (moveGuide) moveGuide.textContent = "STICK TO MOVE";
+    if (fireGuide) fireGuide.textContent = "HOLD FIRE TO SHOOT";
+
+    if (fireButton) {
+      fireButton.classList.toggle("is-pressed", input.touchFireDown);
+      fireButton.setAttribute("aria-pressed", String(input.touchFireDown));
+    }
+
     const bombButton = touchButtons.bomb;
     if (bombButton) {
       const bombLabel = bombButton.querySelector("[data-action-label]");
@@ -270,35 +393,49 @@
 
   canvas.addEventListener("pointerdown", (event) => {
     event.preventDefault();
-    // Keep one active pointer so a second touch cannot hijack the drag.
-    if (input.pointerId !== null) return;
-    if (event.pointerType === "touch" && event.isPrimary === false) return;
-
     const position = pointerPosition(event);
-    input.pointerId = event.pointerId;
-    input.pointerPress = { ...position, pointerId: event.pointerId };
-    input.pointer = {
-      ...position,
-      pointerType: event.pointerType,
-      startX: position.x,
-      startY: position.y,
-      dragOrigin: null
-    };
-    if (typeof canvas.setPointerCapture === "function") {
-      try {
-        canvas.setPointerCapture(event.pointerId);
-      } catch {
-        releasePointer(event.pointerId, true);
+
+    if (isTouchPointer(event) && activeGame?.scene === "playing") {
+      const controls = touchControlGeometry();
+      if (input.stickPointer === null && isWithinRadius(position, controls.stick, TOUCH_STICK_HIT_RADIUS)) {
+        input.stickPointer = {
+          pointerId: event.pointerId,
+          moveX: 0,
+          moveY: 0
+        };
+        updateStickPointer(event, position);
+        captureCanvasPointer(event.pointerId);
         return;
       }
+      if (input.firePointerId === null && isWithinRadius(position, controls.fire, TOUCH_FIRE_HIT_RADIUS)) {
+        input.firePointerId = event.pointerId;
+        input.touchFireDown = true;
+        captureCanvasPointer(event.pointerId);
+      }
+      return;
     }
-    input.pressed.add("Space");
+
+    if (activeGame && isMenuScene(activeGame.scene) && input.menuPointerId === null) {
+      input.menuPointerId = event.pointerId;
+      input.pointerPress = { ...position, pointerId: event.pointerId };
+      input.pressed.add("Space");
+    }
+
+    if (!isTouchPointer(event) && activeGame?.scene === "playing") {
+      input.mousePointer = { ...position, pointerId: event.pointerId };
+      input.pressed.add("Space");
+      captureCanvasPointer(event.pointerId);
+    }
   }, POINTER_EVENT_OPTIONS);
 
   canvas.addEventListener("pointermove", (event) => {
     event.preventDefault();
-    if (event.pointerId !== input.pointerId || !input.pointer) return;
-    Object.assign(input.pointer, pointerPosition(event));
+    const position = pointerPosition(event);
+    if (input.stickPointer?.pointerId === event.pointerId) {
+      updateStickPointer(event, position);
+    } else if (input.mousePointer?.pointerId === event.pointerId) {
+      Object.assign(input.mousePointer, position);
+    }
   }, POINTER_EVENT_OPTIONS);
 
   canvas.addEventListener("pointerup", (event) => {
@@ -323,7 +460,7 @@
   });
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") clearTransientInput();
+    clearTransientInput();
   });
 
   window.addEventListener("pagehide", () => {
@@ -334,34 +471,51 @@
   window.addEventListener("orientationchange", clearTransientInput);
 
   function releasePointer(pointerId = null, cancelPress = false) {
-    if (input.pointerId === null) return;
-    if (pointerId !== null && pointerId !== input.pointerId) return;
-
-    const activePointerId = input.pointerId;
-    input.pointer = null;
-    input.pointerId = null;
-    if (cancelPress) input.pointerPress = null;
-    let hasCapture = false;
-    try {
-      hasCapture = typeof canvas.hasPointerCapture === "function" &&
-        canvas.hasPointerCapture(activePointerId);
-    } catch {
-      // The pointer may already have been invalidated during a viewport change.
-    }
-    if (hasCapture && typeof canvas.releasePointerCapture === "function") {
-      try {
-        canvas.releasePointerCapture(activePointerId);
-      } catch {
-        // Capture may already have been released by the browser.
+    const matches = (id) => pointerId === null || id === pointerId;
+    if (input.stickPointer && matches(input.stickPointer.pointerId)) {
+      const activePointerId = input.stickPointer.pointerId;
+      input.stickPointer = null;
+      if (stickElement) {
+        stickElement.classList.remove("is-active");
+        stickElement.style.setProperty("--stick-x", "0px");
+        stickElement.style.setProperty("--stick-y", "0px");
       }
+      releaseCanvasCapture(activePointerId);
+      releaseElementPointer(stickElement, activePointerId);
+    }
+    if (input.firePointerId !== null && matches(input.firePointerId)) {
+      const activePointerId = input.firePointerId;
+      input.firePointerId = null;
+      input.touchFireDown = false;
+      if (fireButton) {
+        fireButton.classList.remove("is-pressed");
+        fireButton.setAttribute("aria-pressed", "false");
+      }
+      releaseCanvasCapture(activePointerId);
+      releaseElementPointer(fireButton, activePointerId);
+    }
+    if (input.mousePointer && matches(input.mousePointer.pointerId)) {
+      releaseCanvasCapture(input.mousePointer.pointerId);
+      input.mousePointer = null;
+    }
+    if (input.menuPointerId !== null && matches(input.menuPointerId)) {
+      input.menuPointerId = null;
+      if (cancelPress) input.pointerPress = null;
     }
   }
 
   function resetTouchState() {
     input.pressed.delete("Space");
     input.shotQueued = false;
+    input.touchFireDown = false;
     input.pointerPress = null;
+    input.menuPointerId = null;
     releasePointer(null, true);
+    if (input.bombPointerId !== null) {
+      releaseBombPointer(input.bombPointerId, touchButtons.bomb);
+    }
+    input.bombPointerId = null;
+    input.touchFireDown = false;
   }
 
   function clearTransientInput() {
@@ -379,9 +533,133 @@
     };
   }
 
-  function applyDeadzone(value, deadzone) {
-    if (Math.abs(value) <= deadzone) return 0;
-    return value - Math.sign(value) * deadzone;
+  function isTouchPointer(event) {
+    return IS_SMARTPHONE && event.pointerType === "touch";
+  }
+
+  function isMenuScene(scene) {
+    return scene === "title" || scene === "difficulty" ||
+      scene === "stageclear" || scene === "gameover" || scene === "clear";
+  }
+
+  function touchControlGeometry() {
+    const canvasRect = canvas.getBoundingClientRect();
+    const centerInCanvas = (element, fallback) => {
+      if (!element || canvasRect.width <= 0 || canvasRect.height <= 0) return fallback;
+      const rect = element.getBoundingClientRect();
+      return {
+        x: clamp(((rect.left + rect.width / 2 - canvasRect.left) / canvasRect.width) * W, 0, W),
+        y: clamp(((rect.top + rect.height / 2 - canvasRect.top) / canvasRect.height) * H, 0, H)
+      };
+    };
+    return {
+      stick: centerInCanvas(stickBaseElement, TOUCH_STICK_CENTER),
+      fire: centerInCanvas(fireButton, TOUCH_FIRE_CENTER)
+    };
+  }
+
+  function isWithinRadius(point, center, radius) {
+    return distSq(point, center) <= radius * radius;
+  }
+
+  function captureCanvasPointer(pointerId) {
+    if (typeof canvas.setPointerCapture !== "function") return;
+    try {
+      canvas.setPointerCapture(pointerId);
+    } catch {
+      releasePointer(pointerId, true);
+    }
+  }
+
+  function captureElementPointer(element, pointerId) {
+    if (typeof element?.setPointerCapture !== "function") return;
+    try {
+      element.setPointerCapture(pointerId);
+    } catch {
+      releasePointer(pointerId, true);
+    }
+  }
+
+  function releaseCanvasCapture(pointerId) {
+    if (typeof canvas.hasPointerCapture !== "function") return;
+    let hasCapture = false;
+    try {
+      hasCapture = canvas.hasPointerCapture(pointerId);
+    } catch {
+      return;
+    }
+    if (!hasCapture) return;
+    if (typeof canvas.releasePointerCapture !== "function") return;
+    try {
+      canvas.releasePointerCapture(pointerId);
+    } catch {
+      // Capture may already have been released by the browser.
+    }
+  }
+
+  function releaseElementPointer(element, pointerId) {
+    if (typeof element?.hasPointerCapture !== "function") return;
+    try {
+      if (element.hasPointerCapture(pointerId)) element.releasePointerCapture(pointerId);
+    } catch {
+      // Capture may already have been released by the browser.
+    }
+  }
+
+  function updateStickPointer(event, position = null) {
+    if (input.stickPointer?.pointerId !== event.pointerId) return;
+    if (event.currentTarget === stickElement && stickBaseElement && stickKnobElement) {
+      const baseRect = stickBaseElement.getBoundingClientRect();
+      const knobRect = stickKnobElement.getBoundingClientRect();
+      const travel = Math.max(1, Math.min(baseRect.width, baseRect.height) / 2 - Math.max(knobRect.width, knobRect.height) / 2);
+      const dx = event.clientX - (baseRect.left + baseRect.width / 2);
+      const dy = event.clientY - (baseRect.top + baseRect.height / 2);
+      const distance = Math.hypot(dx, dy);
+      const limitedDistance = Math.min(travel, distance);
+      const scale = distance > 0 ? limitedDistance / distance : 0;
+      const moveX = (dx * scale) / travel;
+      const moveY = (dy * scale) / travel;
+      input.stickPointer.moveX = moveX;
+      input.stickPointer.moveY = moveY;
+      stickElement.style.setProperty("--stick-x", `${moveX * travel}px`);
+      stickElement.style.setProperty("--stick-y", `${moveY * travel}px`);
+      return;
+    }
+    if (!position) position = pointerPosition(event);
+    const controls = touchControlGeometry();
+    const dx = position.x - controls.stick.x;
+    const dy = position.y - controls.stick.y;
+    const distance = Math.hypot(dx, dy);
+    const limitedDistance = Math.min(TOUCH_STICK_RADIUS, distance);
+    const scale = distance > 0 ? limitedDistance / distance : 0;
+    const moveX = (dx * scale) / TOUCH_STICK_RADIUS;
+    const moveY = (dy * scale) / TOUCH_STICK_RADIUS;
+    input.stickPointer.moveX = moveX;
+    input.stickPointer.moveY = moveY;
+    if (stickElement) {
+      stickElement.style.setProperty("--stick-x", `${moveX * 28}px`);
+      stickElement.style.setProperty("--stick-y", `${moveY * 28}px`);
+    }
+  }
+
+  function remapStickInput(moveX, moveY) {
+    const magnitude = Math.min(1, Math.hypot(moveX, moveY));
+    if (magnitude <= TOUCH_STICK_DEADZONE) return { x: 0, y: 0 };
+    const remappedMagnitude = Math.pow(
+      (magnitude - TOUCH_STICK_DEADZONE) / (1 - TOUCH_STICK_DEADZONE),
+      TOUCH_STICK_CURVE
+    );
+    const directionScale = magnitude > 0 ? 1 / magnitude : 0;
+    return {
+      x: moveX * directionScale * remappedMagnitude,
+      y: moveY * directionScale * remappedMagnitude
+    };
+  }
+
+  function releaseBombPointer(pointerId, button) {
+    if (input.bombPointerId !== pointerId) return;
+    input.bombPointerId = null;
+    releaseElementPointer(button, pointerId);
   }
 
   function difficultyIndexAt(y, count) {
@@ -820,6 +1098,7 @@
       this.assets = assets;
       this.audio = new AudioEngine();
       this.scene = "title";
+      activeGame = this;
       this.difficulties = ["EASY", "NORMAL", "HARD"];
       this.diffIndex = 1;
       this.highScore = this.loadHighScore();
@@ -900,7 +1179,7 @@
 
     startGame() {
       this.resetRun();
-      this.scene = "playing";
+      this.setScene("playing");
       this.audio.ensure();
       this.audio.stageStart(this.stage.id);
       this.audio.startBgm(this.stage.id, "stage");
@@ -909,10 +1188,16 @@
     advanceStage() {
       if (this.currentStage >= STAGES.length - 1) return;
       this.setupStage(this.currentStage + 1);
-      this.scene = "playing";
+      this.setScene("playing");
       this.audio.ensure();
       this.audio.stageStart(this.stage.id);
       this.audio.startBgm(this.stage.id, "stage");
+    }
+
+    setScene(scene) {
+      if (this.scene === scene) return;
+      this.scene = scene;
+      resetTouchState();
     }
 
     loop(now) {
@@ -931,7 +1216,7 @@
 
       if (input.consume("Escape")) {
         if (this.scene === "playing" || this.scene === "paused" || this.scene === "stageclear") {
-          this.scene = "title";
+          this.setScene("title");
           this.audio.stopBgm();
         }
       }
@@ -940,7 +1225,7 @@
         if (input.consume("Space") || input.consume("Enter")) {
           this.audio.ensure();
           this.audio.menuSelect();
-          this.scene = "difficulty";
+          this.setScene("difficulty");
         }
         return;
       }
@@ -968,7 +1253,7 @@
       if (this.scene === "paused") {
         if (input.consume("Enter") || input.consume("KeyP")) {
           this.audio.menuSelect();
-          this.scene = "playing";
+          this.setScene("playing");
         }
         return;
       }
@@ -988,7 +1273,7 @@
         this.cleanup();
         if (input.consume("Space")) this.startGame();
         if (input.consume("Enter")) {
-          this.scene = "title";
+          this.setScene("title");
           this.audio.stopBgm();
         }
         return;
@@ -996,7 +1281,7 @@
 
       if (input.consume("Enter") || input.consume("KeyP")) {
         this.audio.menuMove();
-        this.scene = "paused";
+        this.setScene("paused");
         return;
       }
 
@@ -1022,25 +1307,18 @@
     updatePlayer(dt) {
       let ax = 0;
       let ay = 0;
-      let touchControlled = false;
       if (input.down("ArrowLeft", "KeyA")) ax -= 1;
       if (input.down("ArrowRight", "KeyD")) ax += 1;
       if (input.down("ArrowUp", "KeyW")) ay -= 1;
       if (input.down("ArrowDown", "KeyS")) ay += 1;
 
-      if (input.pointer) {
-        let targetX = input.pointer.x;
-        let targetY = input.pointer.y;
-        if (input.pointer.pointerType === "touch") {
-          touchControlled = true;
-          if (!input.pointer.dragOrigin) {
-            input.pointer.dragOrigin = { x: this.player.x, y: this.player.y };
-          }
-          const dragX = applyDeadzone(input.pointer.x - input.pointer.startX, TOUCH_DRAG_DEADZONE);
-          const dragY = applyDeadzone(input.pointer.y - input.pointer.startY, TOUCH_DRAG_DEADZONE);
-          targetX = input.pointer.dragOrigin.x + dragX * TOUCH_DRAG_SENSITIVITY;
-          targetY = input.pointer.dragOrigin.y + dragY * TOUCH_DRAG_SENSITIVITY;
-        }
+      if (input.stickPointer) {
+        const stick = remapStickInput(input.stickPointer.moveX, input.stickPointer.moveY);
+        ax = stick.x;
+        ay = stick.y;
+      } else if (input.mousePointer) {
+        const targetX = input.mousePointer.x;
+        const targetY = input.mousePointer.y;
         const dx = targetX - this.player.x;
         const dy = targetY - this.player.y;
         ax = clamp(dx / POINTER_TARGET_RESPONSE, -1, 1);
@@ -1048,7 +1326,7 @@
       }
 
       const inputMagnitude = Math.hypot(ax, ay);
-      if (inputMagnitude > 0 && (!touchControlled || inputMagnitude > 1)) {
+      if (inputMagnitude > 1) {
         ax /= inputMagnitude;
         ay /= inputMagnitude;
       }
@@ -1060,8 +1338,7 @@
       this.player.blink += dt;
 
       if (input.consume("Space")) input.shotQueued = true;
-      const autoFire = IS_SMARTPHONE && this.scene === "playing";
-      if (input.down("Space", "KeyZ") || input.pointer || input.shotQueued || autoFire) {
+      if (input.down("Space", "KeyZ") || input.touchFireDown || input.mousePointer || input.shotQueued) {
         if (this.firePlayer()) input.shotQueued = false;
       }
       if (input.consume("KeyX")) this.useBomb();
@@ -1376,9 +1653,9 @@
         window.setTimeout(() => {
           if (this.scene === "playing") {
             if (!finalStage) {
-              this.scene = "stageclear";
+              this.setScene("stageclear");
             } else {
-              this.scene = "clear";
+              this.setScene("clear");
             }
           }
         }, 1300);
@@ -1398,7 +1675,7 @@
       this.audio.miss();
       if (this.lives <= 0) {
         this.saveHighScore();
-        this.scene = "gameover";
+        this.setScene("gameover");
         this.audio.stopBgm();
         this.audio.gameOver();
         return;
@@ -1639,11 +1916,11 @@
       ctx.font = "9px 'Courier New', monospace";
       ctx.fillText(`HI-SCORE ${padScore(this.highScore)}`, W / 2, 356);
       ctx.fillText(
-        IS_SMARTPHONE ? "DRAG ANYWHERE TO MOVE" : "3 STAGES  ARROWS/WASD  Z/SPACE  X  M",
+        IS_SMARTPHONE ? "LEFT STICK TO MOVE / HOLD FIRE" : "3 STAGES  ARROWS/WASD  Z/SPACE  X  M",
         W / 2,
         378
       );
-      if (IS_SMARTPHONE) ctx.fillText("AUTO FIRE / BOMB WHEN IN DANGER", W / 2, 396);
+      if (IS_SMARTPHONE) ctx.fillText("FIRE TO SHOOT / BOMB IN DANGER", W / 2, 396);
     }
 
     drawWorldDecor() {
@@ -1802,10 +2079,10 @@
     try {
       const assets = await loadAssets();
       drawLoading(1);
-      const game = new Game(assets);
+      activeGame = new Game(assets);
       requestAnimationFrame((time) => {
-        game.last = time;
-        game.loop(time);
+        activeGame.last = time;
+        activeGame.loop(time);
       });
     } catch (error) {
       ctx.fillStyle = "#06090f";

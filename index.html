@@ -10,52 +10,92 @@
     <main class="shell">
       <section class="game-frame" aria-label="Retro vertical shooter game">
         <canvas id="game" width="320" height="480"></canvas>
-        <section class="touch-controls" data-controls="mobile" aria-label="Mobile action controls">
+        <section class="touch-controls" data-controls="mobile-gamepad" aria-label="Mobile gamepad controls">
           <button
-            class="touch-button touch-button--bomb touch-button--primary"
+            class="mobile-stick"
             type="button"
-            data-action="bomb"
-            data-action-priority="primary"
-            data-action-role="emergency"
-            data-action-state="remaining"
-            aria-label="Use bomb (1 remaining)"
-            aria-describedby="mobile-guide-danger"
+            data-control="left-stick"
+            data-control-role="movement"
+            data-pointer-behavior="drag"
+            aria-label="Move player with left virtual stick"
+            aria-describedby="mobile-guide-move"
           >
-            <span class="touch-button__label" data-action-label data-action-count="remaining" aria-live="polite" aria-atomic="true">BOMB 1</span>
-            <small class="touch-button__hint">EMERGENCY</small>
+            <span class="mobile-stick__base" data-control-part="stick-base" aria-hidden="true">
+              <span class="mobile-stick__knob" data-control-part="stick-knob" aria-hidden="true"></span>
+            </span>
           </button>
-          <button
-            class="touch-button touch-button--pause touch-button--secondary"
-            type="button"
-            data-action="pause"
-            data-action-priority="secondary"
-            data-action-role="utility"
-            data-action-state="toggle"
-            aria-label="Pause or resume game"
-            aria-describedby="mobile-guide-pause"
-          >
-            <span class="touch-button__label" data-action-label aria-live="polite" aria-atomic="true">PAUSE</span>
-            <small class="touch-button__hint">UTILITY</small>
-          </button>
-          <button
-            class="touch-button touch-button--mute touch-button--secondary"
-            type="button"
-            data-action="mute"
-            data-action-priority="secondary"
-            data-action-role="utility"
-            data-action-state="toggle"
-            aria-label="Toggle sound"
-            aria-describedby="mobile-guide-mute"
-          >
-            <span class="touch-button__label" data-action-label aria-live="polite" aria-atomic="true">MUTE</span>
-            <small class="touch-button__hint">UTILITY</small>
-          </button>
+          <div class="mobile-gamepad__right-controls" data-control="right-controls" role="group" aria-label="Right-side game controls">
+            <div class="mobile-gamepad__utility-controls" data-control="utility-controls" role="group" aria-label="Pause and sound controls">
+              <button
+                class="touch-button touch-button--pause touch-button--secondary"
+                type="button"
+                data-control="pause"
+                data-action="pause"
+                data-action-priority="secondary"
+                data-action-role="utility"
+                data-action-state="toggle"
+                data-pointer-behavior="tap"
+                aria-label="Pause or resume game"
+                aria-describedby="mobile-guide-pause"
+              >
+                <span class="touch-button__label" data-action-label aria-live="polite" aria-atomic="true">PAUSE</span>
+                <small class="touch-button__hint">UTILITY</small>
+              </button>
+              <button
+                class="touch-button touch-button--mute touch-button--secondary"
+                type="button"
+                data-control="mute"
+                data-action="mute"
+                data-action-priority="secondary"
+                data-action-role="utility"
+                data-action-state="toggle"
+                data-pointer-behavior="tap"
+                aria-label="Mute or unmute game sound"
+                aria-describedby="mobile-guide-mute"
+              >
+                <span class="touch-button__label" data-action-label aria-live="polite" aria-atomic="true">MUTE</span>
+                <small class="touch-button__hint">UTILITY</small>
+              </button>
+            </div>
+            <div class="mobile-gamepad__action-controls" data-control="action-controls" role="group" aria-label="Fire and bomb controls">
+              <button
+                class="touch-button touch-button--fire touch-button--primary"
+                type="button"
+                data-control="fire"
+                data-action="fire"
+                data-action-role="primary"
+                data-action-state="pressed"
+                data-pointer-behavior="hold"
+                aria-label="Fire weapon"
+                aria-pressed="false"
+                aria-describedby="mobile-guide-fire"
+              >
+                <span class="touch-button__label">FIRE</span>
+                <small class="touch-button__hint">HOLD</small>
+              </button>
+              <button
+                class="touch-button touch-button--bomb touch-button--secondary"
+                type="button"
+                data-control="bomb"
+                data-action="bomb"
+                data-action-priority="secondary"
+                data-action-role="emergency"
+                data-action-state="remaining"
+                data-pointer-behavior="tap"
+                aria-label="Use bomb (1 remaining)"
+                aria-describedby="mobile-guide-danger"
+              >
+                <span class="touch-button__label" data-action-label data-action-count="remaining" aria-live="polite" aria-atomic="true">BOMB 1</span>
+                <small class="touch-button__hint">EMERGENCY</small>
+              </button>
+            </div>
+          </div>
         </section>
         <aside class="mobile-guide" data-guide="mobile-controls" aria-label="Mobile controls guide">
           <p class="mobile-guide__title">MOBILE PLAY GUIDE</p>
           <ul class="mobile-guide__list">
-            <li id="mobile-guide-move" data-guide-item="move">DRAG ANYWHERE TO MOVE</li>
-            <li id="mobile-guide-fire" data-guide-item="fire">AUTO FIRE</li>
+            <li id="mobile-guide-move" data-guide-item="move">LEFT STICK TO MOVE</li>
+            <li id="mobile-guide-fire" data-guide-item="fire">HOLD FIRE TO SHOOT</li>
             <li id="mobile-guide-danger" data-guide-item="bomb">BOMB WHEN IN DANGER</li>
             <li id="mobile-guide-pause" data-guide-item="pause">PAUSE TO TAKE A BREAK</li>
             <li id="mobile-guide-mute" data-guide-item="mute">MUTE FOR SILENT PLAY</li>

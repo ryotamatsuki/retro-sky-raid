@@ -344,3 +344,375 @@ canvas {
   filter: saturate(0.45);
   opacity: 0.55;
 }
+
+/*
+ * Mobile virtual gamepad overlay.
+ * The existing canvas keeps ownership of the move/fire pointer.  The
+ * controls layer is therefore visual-only except for its real buttons.
+ */
+@media (max-width: 800px),
+  (max-height: 600px) and (max-width: 1000px) and (orientation: landscape),
+  (max-height: 600px) and (orientation: landscape) and (pointer: coarse) {
+  .game-frame {
+    position: relative;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .touch-controls {
+    --control-left: max(8px, env(safe-area-inset-left));
+    --control-right: max(8px, env(safe-area-inset-right));
+    --control-top: max(8px, env(safe-area-inset-top));
+    --control-bottom: max(8px, env(safe-area-inset-bottom));
+    --stick-size: clamp(90px, 25vw, 110px);
+    --fire-size: clamp(72px, 20vw, 84px);
+    --bomb-size: clamp(52px, 15vw, 60px);
+    --utility-size: clamp(32px, 10vw, 40px);
+
+    position: absolute;
+    inset: 8px;
+    z-index: 3;
+    display: block;
+    width: auto;
+    margin: 0;
+    pointer-events: none;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+  }
+
+  .touch-controls::before,
+  .touch-controls::after {
+    position: absolute;
+    display: grid;
+    place-items: center;
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    font: inherit;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    line-height: 1;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  }
+
+  /* 100px-class stick with a 46px-class centered knob. */
+  .touch-controls::before {
+    content: "MOVE";
+    left: var(--control-left);
+    bottom: var(--control-bottom);
+    width: var(--stick-size);
+    height: var(--stick-size);
+    border: 2px solid rgba(64, 214, 255, 0.34);
+    border-radius: 50%;
+    color: rgba(232, 247, 255, 0.58);
+    font-size: clamp(8px, 2.4vw, 10px);
+    background:
+      radial-gradient(circle at 50% 50%,
+        rgba(232, 247, 255, 0.64) 0 23px,
+        rgba(64, 214, 255, 0.48) 24px 27px,
+        rgba(64, 214, 255, 0.22) 28px 46px,
+        rgba(64, 214, 255, 0.12) 47px 50%,
+        transparent 51%),
+      radial-gradient(circle, rgba(64, 214, 255, 0.16), rgba(64, 214, 255, 0.04) 68%, transparent 70%);
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+      0 0 18px rgba(64, 214, 255, 0.14);
+    opacity: 0.3;
+  }
+
+  /* Legacy fallback affordances remain hidden when the HTML gamepad is present. */
+  .touch-controls::after {
+    content: "FIRE";
+    right: var(--control-right);
+    bottom: var(--control-bottom);
+    width: var(--fire-size);
+    height: var(--fire-size);
+    border: 2px solid rgba(255, 189, 53, 0.68);
+    border-radius: 50%;
+    color: rgba(255, 240, 190, 0.82);
+    font-size: clamp(11px, 3.2vw, 14px);
+    background: radial-gradient(circle, rgba(255, 189, 53, 0.38), rgba(255, 92, 42, 0.2) 62%, rgba(255, 64, 87, 0.12));
+    box-shadow:
+      inset 0 0 0 3px rgba(255, 255, 255, 0.08),
+      0 0 18px rgba(255, 189, 53, 0.16);
+    opacity: 0.3;
+  }
+
+  canvas:active + .touch-controls::before,
+  canvas:active + .touch-controls::after {
+    opacity: 0.68;
+  }
+
+  .touch-button {
+    position: absolute;
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    width: var(--utility-size);
+    min-width: var(--utility-size);
+    height: var(--utility-size);
+    min-height: var(--utility-size);
+    padding: 0;
+    border-width: 1px;
+    border-radius: 50%;
+    pointer-events: auto;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    font-size: clamp(8px, 2.5vw, 10px);
+    letter-spacing: 0.03em;
+    line-height: 1;
+  }
+
+  .touch-button__hint {
+    display: none;
+  }
+
+  .touch-button--bomb {
+    right: calc(var(--control-right) + var(--fire-size) - (var(--bomb-size) / 2));
+    bottom: calc(var(--control-bottom) + var(--fire-size) + 10px);
+    width: var(--bomb-size);
+    min-width: var(--bomb-size);
+    height: var(--bomb-size);
+    min-height: var(--bomb-size);
+    border: 2px solid rgba(255, 64, 87, 0.72);
+    color: #ffd9de;
+    background: radial-gradient(circle, rgba(255, 64, 87, 0.46), rgba(120, 24, 45, 0.3));
+    box-shadow:
+      inset 0 0 0 2px rgba(255, 255, 255, 0.08),
+      0 0 14px rgba(255, 64, 87, 0.14);
+    font-size: clamp(8px, 2.3vw, 10px);
+    opacity: 0.3;
+  }
+
+  .touch-button--pause {
+    top: var(--control-top);
+    right: var(--control-right);
+    border-color: rgba(255, 189, 53, 0.78);
+    color: #ffe6a2;
+    background: rgba(81, 64, 29, 0.62);
+    opacity: 0.3;
+  }
+
+  .touch-button--mute {
+    top: var(--control-top);
+    right: calc(var(--control-right) + var(--utility-size) + 6px);
+    border-color: rgba(64, 214, 255, 0.78);
+    color: #c9f5ff;
+    background: rgba(23, 63, 76, 0.62);
+    opacity: 0.3;
+  }
+
+  .touch-button:active {
+    transform: scale(0.94);
+    opacity: 0.7;
+  }
+}
+
+/* Compact landscape fallback: preserve the overlay while fitting the canvas. */
+@media (max-width: 800px) and (orientation: landscape),
+  (max-height: 600px) and (max-width: 1000px) and (orientation: landscape),
+  (max-height: 600px) and (orientation: landscape) and (pointer: coarse) {
+  .game-frame {
+    width: min(100%, 760px);
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .touch-controls {
+    --control-top: max(6px, env(safe-area-inset-top));
+    --control-bottom: max(6px, env(safe-area-inset-bottom));
+    --control-left: max(6px, env(safe-area-inset-left));
+    --control-right: max(6px, env(safe-area-inset-right));
+    --stick-size: clamp(90px, 19vh, 100px);
+    --fire-size: clamp(72px, 16vh, 80px);
+    --bomb-size: clamp(52px, 12vh, 58px);
+    --utility-size: clamp(32px, 8vh, 38px);
+    inset: 6px;
+  }
+
+  canvas {
+    grid-column: auto;
+    grid-row: auto;
+  }
+}
+
+/* Real HTML controls sit above the canvas and own their individual pointers. */
+@media (max-width: 800px),
+  (max-height: 600px) and (max-width: 1000px) and (orientation: landscape),
+  (max-height: 600px) and (orientation: landscape) and (pointer: coarse) {
+  .touch-controls::before,
+  .touch-controls::after {
+    display: none;
+  }
+
+  .touch-controls {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .mobile-stick {
+    position: absolute;
+    left: max(8px, env(safe-area-inset-left));
+    bottom: max(8px, env(safe-area-inset-bottom));
+    z-index: 4;
+    display: block;
+    width: var(--stick-size);
+    height: var(--stick-size);
+    min-width: var(--stick-size);
+    min-height: var(--stick-size);
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    color: inherit;
+    background: transparent;
+    pointer-events: auto;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .mobile-stick__base {
+    position: absolute;
+    inset: 0;
+    display: block;
+    border: 2px solid rgba(64, 214, 255, 0.34);
+    border-radius: 50%;
+    background:
+      radial-gradient(circle at 50% 50%,
+        rgba(232, 247, 255, 0.18) 0 23%,
+        rgba(64, 214, 255, 0.18) 24% 28%,
+        rgba(64, 214, 255, 0.08) 29% 68%,
+        rgba(64, 214, 255, 0.03) 69% 100%);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08), 0 0 18px rgba(64, 214, 255, 0.12);
+    opacity: 0.3;
+  }
+
+  .mobile-stick::after {
+    content: "MOVE";
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: rgba(232, 247, 255, 0.58);
+    font: 700 clamp(8px, 2.4vw, 10px)/1 "Courier New", monospace;
+    letter-spacing: 0.08em;
+    pointer-events: none;
+  }
+
+  .mobile-stick__knob {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: clamp(42px, 12vw, 50px);
+    height: clamp(42px, 12vw, 50px);
+    border: 2px solid rgba(232, 247, 255, 0.58);
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, rgba(232, 247, 255, 0.62), rgba(64, 214, 255, 0.22) 55%, rgba(64, 214, 255, 0.1));
+    box-shadow: inset 0 0 0 2px rgba(64, 214, 255, 0.12), 0 0 12px rgba(64, 214, 255, 0.14);
+    transform: translate(calc(-50% + var(--stick-x, 0px)), calc(-50% + var(--stick-y, 0px)));
+    pointer-events: none;
+  }
+
+  .mobile-stick.is-active .mobile-stick__base,
+  .mobile-stick.is-active .mobile-stick__knob {
+    opacity: 0.68;
+  }
+
+  .mobile-gamepad__right-controls {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .mobile-gamepad__utility-controls {
+    position: absolute;
+    top: max(8px, env(safe-area-inset-top));
+    right: max(8px, env(safe-area-inset-right));
+    display: flex;
+    gap: 6px;
+    pointer-events: none;
+  }
+
+  .mobile-gamepad__action-controls {
+    position: absolute;
+    right: max(8px, env(safe-area-inset-right));
+    bottom: max(8px, env(safe-area-inset-bottom));
+    display: flex;
+    flex-direction: column-reverse;
+    align-items: center;
+    gap: 8px;
+    pointer-events: none;
+  }
+
+  .mobile-gamepad__utility-controls .touch-button,
+  .mobile-gamepad__action-controls .touch-button {
+    position: relative;
+    inset: auto;
+    display: grid;
+    place-items: center;
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+    border-radius: 50%;
+    pointer-events: auto;
+    touch-action: none;
+  }
+
+  .mobile-gamepad__utility-controls .touch-button {
+    width: var(--utility-size);
+    height: var(--utility-size);
+    font-size: clamp(7px, 2.1vw, 10px);
+    opacity: 0.3;
+  }
+
+  .mobile-gamepad__utility-controls .touch-button:active,
+  .mobile-gamepad__utility-controls .touch-button:focus-visible {
+    opacity: 0.68;
+  }
+
+  .mobile-gamepad__action-controls .touch-button--fire {
+    width: var(--fire-size);
+    height: var(--fire-size);
+    border: 2px solid rgba(255, 189, 53, 0.72);
+    color: #fff0be;
+    background: radial-gradient(circle, rgba(255, 189, 53, 0.38), rgba(255, 92, 42, 0.2) 62%, rgba(255, 64, 87, 0.12));
+    font-size: clamp(11px, 3.2vw, 14px);
+    opacity: 0.3;
+  }
+
+  .mobile-gamepad__action-controls .touch-button--fire.is-pressed,
+  .mobile-gamepad__action-controls .touch-button--fire:active {
+    opacity: 0.72;
+    transform: scale(0.94);
+    box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.12), 0 0 18px rgba(255, 189, 53, 0.28);
+  }
+
+  .mobile-gamepad__action-controls .touch-button--bomb {
+    width: var(--bomb-size);
+    height: var(--bomb-size);
+    border: 2px solid rgba(255, 64, 87, 0.72);
+    color: #ffd9de;
+    background: radial-gradient(circle, rgba(255, 64, 87, 0.46), rgba(120, 24, 45, 0.3));
+    font-size: clamp(8px, 2.3vw, 10px);
+    opacity: 0.3;
+  }
+
+  .mobile-gamepad__action-controls .touch-button--bomb:active,
+  .mobile-gamepad__action-controls .touch-button--bomb:focus-visible {
+    opacity: 0.7;
+  }
+
+  .mobile-gamepad__action-controls .touch-button__hint,
+  .mobile-gamepad__utility-controls .touch-button__hint {
+    display: none;
+  }
+}
