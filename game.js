@@ -159,6 +159,9 @@
     keys: new Set(),
     pressed: new Set(),
     pointer: null,
+    pointerId: null,
+    pointerPress: null,
+    shotQueued: false,
     consume(code) {
       if (!this.pressed.has(code)) return false;
       this.pressed.delete(code);
@@ -182,19 +185,116 @@
     input.keys.delete(event.code);
   });
 
+  const actionCodes = {
+    bomb: "KeyX",
+    pause: "KeyP",
+    mute: "KeyM"
+  };
+  const touchButtons = {};
+  document.querySelectorAll("[data-action]").forEach((button) => {
+    const code = actionCodes[button.dataset.action];
+    if (!code) return;
+    touchButtons[button.dataset.action] = button;
+    // click covers touch, keyboard, and assistive-technology activation once.
+    button.addEventListener("click", () => {
+      input.pressed.add(code);
+    });
+  });
+
+  function syncTouchControls(game) {
+    const bombButton = touchButtons.bomb;
+    if (bombButton) {
+      const bombLabel = bombButton.querySelector("[data-action-label]");
+      if (bombLabel) bombLabel.textContent = `BOMB ${game.bombs}`;
+      bombButton.disabled = game.bombs <= 0;
+      bombButton.setAttribute("aria-label", `Use bomb (${game.bombs} remaining)`);
+    }
+
+    const pauseButton = touchButtons.pause;
+    if (pauseButton) {
+      const pauseLabel = pauseButton.querySelector("[data-action-label]");
+      const paused = game.scene === "paused";
+      if (pauseLabel) pauseLabel.textContent = paused ? "RESUME" : "PAUSE";
+      pauseButton.setAttribute("aria-label", paused ? "Resume game" : "Pause game");
+    }
+
+    const muteButton = touchButtons.mute;
+    if (muteButton) {
+      const muteLabel = muteButton.querySelector("[data-action-label]");
+      const muted = game.audio.muted;
+      if (muteLabel) muteLabel.textContent = muted ? "SOUND" : "MUTE";
+      muteButton.setAttribute("aria-label", muted ? "Turn sound on" : "Mute sound");
+    }
+  }
+
   canvas.addEventListener("pointerdown", (event) => {
+    // Keep one active pointer so a second touch cannot hijack the drag.
+    if (input.pointerId !== null) return;
+    if (event.pointerType === "touch" && event.isPrimary === false) return;
+
+    const position = pointerPosition(event);
+    input.pointerId = event.pointerId;
+    input.pointerPress = { ...position, pointerId: event.pointerId };
+    input.pointer = {
+      ...position,
+      pointerType: event.pointerType,
+      startX: position.x,
+      startY: position.y,
+      dragOrigin: null
+    };
     canvas.setPointerCapture(event.pointerId);
-    input.pointer = pointerPosition(event);
     input.pressed.add("Space");
   });
 
   canvas.addEventListener("pointermove", (event) => {
-    if (input.pointer) input.pointer = pointerPosition(event);
+    if (event.pointerId !== input.pointerId || !input.pointer) return;
+    Object.assign(input.pointer, pointerPosition(event));
   });
 
-  canvas.addEventListener("pointerup", () => {
-    input.pointer = null;
+  canvas.addEventListener("pointerup", (event) => {
+    releasePointer(event.pointerId);
   });
+
+  canvas.addEventListener("pointercancel", (event) => {
+    releasePointer(event.pointerId, true);
+  });
+
+  canvas.addEventListener("lostpointercapture", (event) => {
+    releasePointer(event.pointerId, true);
+  });
+
+  window.addEventListener("blur", () => {
+    clearTransientInput();
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") clearTransientInput();
+  });
+
+  window.addEventListener("pagehide", () => {
+    clearTransientInput();
+  });
+
+  function releasePointer(pointerId = null, cancelPress = false) {
+    if (input.pointerId === null) return;
+    if (pointerId !== null && pointerId !== input.pointerId) return;
+
+    const activePointerId = input.pointerId;
+    input.pointer = null;
+    input.pointerId = null;
+    if (cancelPress) input.pointerPress = null;
+    if (canvas.hasPointerCapture && canvas.hasPointerCapture(activePointerId)) {
+      canvas.releasePointerCapture(activePointerId);
+    }
+  }
+
+  function clearTransientInput() {
+    input.keys.clear();
+    input.pressed.clear();
+    input.pointerPress = null;
+    input.shotQueued = false;
+    releasePointer();
+  }
 
   function pointerPosition(event) {
     const rect = canvas.getBoundingClientRect();
@@ -202,6 +302,11 @@
       x: ((event.clientX - rect.left) / rect.width) * W,
       y: ((event.clientY - rect.top) / rect.height) * H
     };
+  }
+
+  function difficultyIndexAt(y, count) {
+    if (!Number.isFinite(y) || y < 180 || y > 306 || count <= 0) return -1;
+    return Math.min(count - 1, Math.floor((y - 180) / 42));
   }
 
   function clamp(value, min, max) {
@@ -737,6 +842,7 @@
       this.update(dt);
       this.draw();
       input.pressed.clear();
+      input.pointerPress = null;
       requestAnimationFrame((time) => this.loop(time));
     }
 
@@ -768,7 +874,11 @@
           this.diffIndex = (this.diffIndex + 1) % this.difficulties.length;
           this.audio.menuMove();
         }
+        const tapIndex = input.pointerPress
+          ? difficultyIndexAt(input.pointerPress.y, this.difficulties.length)
+          : -1;
         if (input.consume("Space") || input.consume("Enter")) {
+          if (tapIndex >= 0) this.diffIndex = tapIndex;
           this.audio.menuSelect();
           this.startGame();
         }
@@ -838,8 +948,17 @@
       if (input.down("ArrowDown", "KeyS")) ay += 1;
 
       if (input.pointer) {
-        const dx = input.pointer.x - this.player.x;
-        const dy = input.pointer.y - this.player.y;
+        let targetX = input.pointer.x;
+        let targetY = input.pointer.y;
+        if (input.pointer.pointerType === "touch") {
+          if (!input.pointer.dragOrigin) {
+            input.pointer.dragOrigin = { x: this.player.x, y: this.player.y };
+          }
+          targetX = input.pointer.dragOrigin.x + input.pointer.x - input.pointer.startX;
+          targetY = input.pointer.dragOrigin.y + input.pointer.y - input.pointer.startY;
+        }
+        const dx = targetX - this.player.x;
+        const dy = targetY - this.player.y;
         ax = clamp(dx / 18, -1, 1);
         ay = clamp(dy / 18, -1, 1);
       }
@@ -856,12 +975,15 @@
       this.player.inv = Math.max(0, this.player.inv - dt);
       this.player.blink += dt;
 
-      if (input.down("Space", "KeyZ") || input.pointer) this.firePlayer();
+      if (input.consume("Space")) input.shotQueued = true;
+      if (input.down("Space", "KeyZ") || input.pointer || input.shotQueued) {
+        if (this.firePlayer()) input.shotQueued = false;
+      }
       if (input.consume("KeyX")) this.useBomb();
     }
 
     firePlayer() {
-      if (this.player.shotCd > 0) return;
+      if (this.player.shotCd > 0) return false;
       const level = this.power;
       const rate = level >= 4 ? 0.09 : 0.115;
       this.player.shotCd = rate;
@@ -892,6 +1014,7 @@
         });
       }
       this.audio.shot(this.power);
+      return true;
     }
 
     useBomb() {
@@ -1232,6 +1355,7 @@
     draw() {
       ctx.clearRect(0, 0, W, H);
       ctx.imageSmoothingEnabled = false;
+      syncTouchControls(this);
       this.drawBackground();
       if (this.scene === "title") this.drawTitle();
       else if (this.scene === "difficulty") this.drawDifficulty();
@@ -1425,11 +1549,11 @@
       drawSprite(this.assets.sprites.player, W / 2, 220 + Math.sin(this.t * 3) * 3, 68, 72);
       ctx.fillStyle = "#f2fbff";
       ctx.font = "bold 11px 'Courier New', monospace";
-      ctx.fillText("PRESS SPACE / ENTER", W / 2, 332);
+      ctx.fillText("TAP / SPACE TO START", W / 2, 332);
       ctx.fillStyle = "#9ab0c8";
       ctx.font = "9px 'Courier New', monospace";
       ctx.fillText(`HI-SCORE ${padScore(this.highScore)}`, W / 2, 356);
-      ctx.fillText("3 STAGES  ARROWS/WASD  Z/SPACE  X  M", W / 2, 378);
+      ctx.fillText("DRAG TO MOVE / HOLD TO FIRE", W / 2, 378);
     }
 
     drawWorldDecor() {
@@ -1460,7 +1584,7 @@
       }
       ctx.fillStyle = "#9ab0c8";
       ctx.font = "9px 'Courier New', monospace";
-      ctx.fillText("LEFT / RIGHT TO CHANGE", W / 2, 352);
+      ctx.fillText("TAP OPTION / LEFT-RIGHT TO CHANGE", W / 2, 352);
     }
 
     drawStageBanner() {

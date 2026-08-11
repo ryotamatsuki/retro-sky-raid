@@ -2,7 +2,7 @@
 <html lang="ja">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Retro Sky Raid</title>
     <link rel="stylesheet" href="style.css">
   </head>
@@ -10,6 +10,17 @@
     <main class="shell">
       <section class="game-frame" aria-label="Retro vertical shooter game">
         <canvas id="game" width="320" height="480"></canvas>
+        <div class="touch-controls" aria-label="Touch controls">
+          <button class="touch-button touch-button--bomb" type="button" data-action="bomb" aria-label="Use bomb">
+            <span data-action-label>BOMB</span>
+          </button>
+          <button class="touch-button touch-button--pause" type="button" data-action="pause" aria-label="Pause or resume game">
+            <span data-action-label>PAUSE</span>
+          </button>
+          <button class="touch-button touch-button--mute" type="button" data-action="mute" aria-label="Toggle sound">
+            <span data-action-label>MUTE</span>
+          </button>
+        </div>
       </section>
       <aside class="side-panel" aria-label="Game status">
         <div class="panel-title">RETRO SKY RAID</div>
