@@ -2316,49 +2316,46 @@
       const raw = this.assets.raw;
       const stage = this.stage || STAGES[0];
       const tile = 48;
-      const offset = -((this.scroll % tile) | 0);
+      // Snap the scroll to whole canvas pixels and move the ground toward the
+      // player. Positive scroll therefore places newer rows farther down the
+      // screen, matching the enemies' approach direction.
+      const scrollPx = Math.floor(this.scroll);
+      const offset = scrollPx % tile;
+      const mod = (value, divisor) => ((value % divisor) + divisor) % divisor;
       for (let y = offset - tile; y < H + tile; y += tile) {
-        const row = Math.floor((y + this.scroll) / tile);
+        const row = Math.floor((y - scrollPx) / tile);
         for (let x = 0; x < W; x += tile) {
           let img = raw.grass;
           if (stage.terrain === "coast") {
-            if (x < 48 && row % 8 < 4) img = raw.water;
+            if (x < 48 && mod(row, 8) < 4) img = raw.water;
             else if (x >= 112 && x < 208) img = raw.road;
-            else if ((row + Math.floor(x / tile)) % 13 === 0) img = raw.dirt;
+            else if (mod(row + Math.floor(x / tile), 13) === 0) img = raw.dirt;
           } else if (stage.terrain === "forest") {
             if (x >= 96 && x < 192) img = raw.road;
-            else if ((row + Math.floor(x / tile)) % 4 === 0) img = raw.dirt;
+            else if (mod(row + Math.floor(x / tile), 4) === 0) img = raw.dirt;
             else img = raw.grass;
           } else {
-            if (x >= 96 && x < 224) img = row % 2 === 0 ? raw.runway : raw.road;
-            else if ((row + Math.floor(x / tile)) % 3 === 0) img = raw.concrete;
+            if (x >= 96 && x < 224) img = mod(row, 2) === 0 ? raw.runway : raw.road;
+            else if (mod(row + Math.floor(x / tile), 3) === 0) img = raw.concrete;
             else img = raw.dirt;
           }
           ctx.drawImage(img, x, y, tile, tile);
         }
         if (stage.terrain === "coast") {
-          if (row % 15 === 0) ctx.drawImage(raw.base, 220, y, 68, 68);
-          if (row % 19 === 8) ctx.drawImage(raw.runway, 112, y, 96, 96);
-          if (row % 17 === 5) ctx.drawImage(raw.concrete, 48, y, 64, 64);
+          if (mod(row, 15) === 0) ctx.drawImage(raw.base, 220, y, 68, 68);
+          if (mod(row, 19) === 8) ctx.drawImage(raw.runway, 112, y, 96, 96);
+          if (mod(row, 17) === 5) ctx.drawImage(raw.concrete, 48, y, 64, 64);
         } else if (stage.terrain === "forest") {
-          if (row % 11 === 0) ctx.drawImage(raw.base, 18, y, 66, 66);
-          if (row % 13 === 6) ctx.drawImage(raw.concrete, 226, y, 62, 62);
+          if (mod(row, 11) === 0) ctx.drawImage(raw.base, 18, y, 66, 66);
+          if (mod(row, 13) === 6) ctx.drawImage(raw.concrete, 226, y, 62, 62);
         } else {
-          if (row % 7 === 0) ctx.drawImage(raw.concrete, 28, y, 64, 64);
-          if (row % 9 === 4) ctx.drawImage(raw.base, 230, y, 70, 70);
-          if (row % 12 === 6) ctx.drawImage(raw.runway, 96, y, 128, 96);
+          if (mod(row, 7) === 0) ctx.drawImage(raw.concrete, 28, y, 64, 64);
+          if (mod(row, 9) === 4) ctx.drawImage(raw.base, 230, y, 70, 70);
+          if (mod(row, 12) === 6) ctx.drawImage(raw.runway, 96, y, 128, 96);
         }
       }
       ctx.fillStyle = stage.overlay;
       ctx.fillRect(0, HUD_H, W, H - HUD_H);
-      ctx.strokeStyle = "rgba(108, 230, 255, 0.18)";
-      ctx.lineWidth = 1;
-      for (let y = HUD_H + ((this.scroll * 0.35) % 16); y < H; y += 16) {
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(W, y);
-        ctx.stroke();
-      }
     }
 
     drawWorld() {
